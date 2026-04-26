@@ -370,8 +370,10 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
     gtk_window_set_resizable(qh->window, TRUE);
 
-    /* Escape and scroll key handler */
+    /* Escape and scroll key handler (capture phase so GtkText doesn't
+       partially handle Tab/arrows before we suppress them) */
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(key_ctrl, GTK_PHASE_CAPTURE);
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_key_pressed), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->window), key_ctrl);
 

@@ -5,6 +5,13 @@
 #include "system_context.h"
 #include "window.h"
 
+static void on_alert_dismissed(GObject *source, GAsyncResult *res, gpointer user_data) {
+    GtkAlertDialog *alert = GTK_ALERT_DIALOG(source);
+    GApplication *app = user_data;
+    gtk_alert_dialog_choose_finish(alert, res, NULL);
+    g_application_release(app);
+}
+
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
 
@@ -14,7 +21,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         GtkAlertDialog *alert = gtk_alert_dialog_new(
             "ANTHROPIC_API_KEY environment variable is not set.\n\n"
             "Set it with:\n  export ANTHROPIC_API_KEY=sk-ant-...");
-        gtk_alert_dialog_show(alert, NULL);
+        g_application_hold(G_APPLICATION(app));
+        gtk_alert_dialog_choose(alert, NULL, NULL, on_alert_dismissed, app);
         g_object_unref(alert);
         return;
     }
