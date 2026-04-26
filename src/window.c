@@ -269,7 +269,9 @@ static gboolean on_stream_update(gpointer data) {
         gtk_spinner_stop(qh->spinner);
         gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
         gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
-        gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), TRUE);
+        if (!had_error)
+            set_input_text(qh, "");
+        gtk_text_view_set_editable(qh->text_view, TRUE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
     } else {
         render_conversation(qh, snapshot);
@@ -507,9 +509,11 @@ static void on_submit(QuickHelpWindow *qh) {
     }
     qh->msg_count++;
 
-    /* Clear input and show spinner */
+    /* Clear input, show placeholder, and disable */
     set_input_text(qh, "");
-    gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), FALSE);
+    GtkTextBuffer *tbuf = gtk_text_view_get_buffer(qh->text_view);
+    gtk_text_buffer_set_text(tbuf, "Press enter to cancel", -1);
+    gtk_text_view_set_editable(qh->text_view, FALSE);
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
     gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), TRUE);
     gtk_spinner_start(qh->spinner);
