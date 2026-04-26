@@ -699,6 +699,58 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
+    /* Ctrl+Alt+Up/Down: jump to prev/next user message */
+    if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) &&
+        (state & GDK_CONTROL_MASK) && (state & GDK_ALT_MASK)) {
+        /* Find the user message widgets in chat_box */
+        GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
+        GPtrArray *user_widgets = g_ptr_array_new();
+        int widget_idx = 0;
+        for (int i = 0; i < qh->msg_count && child; i++) {
+            if (g_strcmp0(qh->messages[i].role, "user") == 0) {
+                /* Skip image row if present */
+                if (qh->messages[i].image_count > 0) {
+                    child = gtk_widget_get_next_sibling(child);
+                }
+                g_ptr_array_add(user_widgets, child);
+            }
+            child = gtk_widget_get_next_sibling(child);
+        }
+        if (user_widgets->len > 0) {
+            GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+            double cur = gtk_adjustment_get_value(adj);
+            GtkWidget *target = NULL;
+
+            if (keyval == GDK_KEY_Down) {
+                /* Find first user message below current scroll position */
+                for (guint i = 0; i < user_widgets->len; i++) {
+                    GtkWidget *w = g_ptr_array_index(user_widgets, i);
+                    double wy;
+                    gtk_widget_translate_coordinates(w,
+                        GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
+                    if (wy > cur + 1.0) { target = w; break; }
+                }
+            } else {
+                /* Find last user message above current scroll position */
+                for (int i = user_widgets->len - 1; i >= 0; i--) {
+                    GtkWidget *w = g_ptr_array_index(user_widgets, i);
+                    double wy;
+                    gtk_widget_translate_coordinates(w,
+                        GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
+                    if (wy < cur - 1.0) { target = w; break; }
+                }
+            }
+            if (target) {
+                double wy;
+                gtk_widget_translate_coordinates(target,
+                    GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
+                gtk_adjustment_set_value(adj, wy);
+            }
+        }
+        g_ptr_array_unref(user_widgets);
+        return TRUE;
+    }
+
     /* Alt+Up/Down: cycle model */
     if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_ALT_MASK)) {
         guint idx = gtk_drop_down_get_selected(qh->model_dropdown);
