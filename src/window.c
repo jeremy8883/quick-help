@@ -64,6 +64,7 @@ struct _QuickHelpWindow {
     char *stream_error_msg;     /* protected by stream_lock */
     GPtrArray *pending_images;  /* array of PendingImage* */
     GtkBox *image_preview_box;  /* horizontal box for thumbnails */
+    GtkButton *scroll_to_bottom; /* floating chevron button */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -113,7 +114,9 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
 static void expand_window(QuickHelpWindow *qh) {
     if (qh->expanded) return;
     qh->expanded = TRUE;
-    gtk_widget_set_visible(GTK_WIDGET(qh->scroll), TRUE);
+    /* Show the overlay (which contains the scroll area) */
+    gtk_widget_set_visible(
+        gtk_widget_get_parent(GTK_WIDGET(qh->scroll)), TRUE);
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, EXPANDED_HEIGHT);
 }
 
@@ -146,6 +149,40 @@ static GtkWidget *make_image_row(AiImage *images, int count) {
     }
     gtk_scrolled_window_set_child(sw, GTK_WIDGET(row));
     return GTK_WIDGET(sw);
+}
+
+static gboolean is_scrolled_to_bottom(QuickHelpWindow *qh) {
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+    double val = gtk_adjustment_get_value(adj);
+    double upper = gtk_adjustment_get_upper(adj);
+    double page = gtk_adjustment_get_page_size(adj);
+    return val >= upper - page - 1.0;
+}
+
+static void scroll_to_bottom(QuickHelpWindow *qh) {
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+    double upper = gtk_adjustment_get_upper(adj);
+    double page = gtk_adjustment_get_page_size(adj);
+    gtk_adjustment_set_value(adj, upper - page);
+}
+
+static void update_scroll_button(QuickHelpWindow *qh) {
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+    double val = gtk_adjustment_get_value(adj);
+    gboolean at_bottom = is_scrolled_to_bottom(qh);
+    /* Show chevron only when not at bottom and scroll position > 0 */
+    gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom),
+                           val > 0 && !at_bottom);
+}
+
+static void on_scroll_changed(GtkAdjustment *adj, gpointer data) {
+    (void)adj;
+    update_scroll_button(data);
+}
+
+static void on_scroll_to_bottom_clicked(GtkButton *btn, gpointer data) {
+    (void)btn;
+    scroll_to_bottom(data);
 }
 
 /* Helper: create a selectable, wrapping label from Pango markup */
@@ -274,8 +311,13 @@ static gboolean on_stream_update(gpointer data) {
         gtk_text_view_set_editable(qh->text_view, TRUE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
     } else {
+        gboolean was_at_bottom = is_scrolled_to_bottom(qh);
         render_conversation(qh, snapshot);
         g_free(snapshot);
+        /* Auto-scroll only if already at bottom and not at top */
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+        if (was_at_bottom && gtk_adjustment_get_value(adj) > 0)
+            scroll_to_bottom(qh);
     }
 
     return G_SOURCE_REMOVE;
@@ -630,7 +672,8 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         g_array_set_size(qh->tab_types, 0);
         qh->focused_link = -1;
         qh->link_count = 0;
-        gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
+        gtk_widget_set_visible(
+            gtk_widget_get_parent(GTK_WIDGET(qh->scroll)), FALSE);
         qh->expanded = FALSE;
         gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
         set_input_text(qh, "");
@@ -834,12 +877,33 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
     gtk_box_append(qh->vbox, GTK_WIDGET(qh->error_label));
 
-    /* Scrolled response area (hidden initially) */
+    /* Scrolled response area (hidden initially), with overlay for chevron */
+    GtkOverlay *overlay = GTK_OVERLAY(gtk_overlay_new());
+    gtk_widget_set_vexpand(GTK_WIDGET(overlay), TRUE);
+    gtk_widget_set_visible(GTK_WIDGET(overlay), FALSE);
+    gtk_box_append(qh->vbox, GTK_WIDGET(overlay));
+
     qh->scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
     gtk_scrolled_window_set_policy(qh->scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_vexpand(GTK_WIDGET(qh->scroll), TRUE);
-    gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
-    gtk_box_append(qh->vbox, GTK_WIDGET(qh->scroll));
+    gtk_overlay_set_child(overlay, GTK_WIDGET(qh->scroll));
+
+    /* Floating scroll-to-bottom button */
+    qh->scroll_to_bottom = GTK_BUTTON(gtk_button_new_from_icon_name(
+        "go-down-symbolic"));
+    gtk_widget_add_css_class(GTK_WIDGET(qh->scroll_to_bottom), "circular");
+    gtk_widget_add_css_class(GTK_WIDGET(qh->scroll_to_bottom), "osd");
+    gtk_widget_set_halign(GTK_WIDGET(qh->scroll_to_bottom), GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(GTK_WIDGET(qh->scroll_to_bottom), GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(qh->scroll_to_bottom), 8);
+    gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom), FALSE);
+    g_signal_connect(qh->scroll_to_bottom, "clicked",
+                     G_CALLBACK(on_scroll_to_bottom_clicked), qh);
+    gtk_overlay_add_overlay(overlay, GTK_WIDGET(qh->scroll_to_bottom));
+
+    /* Track scroll position to show/hide chevron */
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+    g_signal_connect(vadj, "value-changed", G_CALLBACK(on_scroll_changed), qh);
+    g_signal_connect(vadj, "notify::upper", G_CALLBACK(on_scroll_changed), qh);
 
     qh->chat_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8));
     gtk_widget_set_margin_top(GTK_WIDGET(qh->chat_box), 4);
