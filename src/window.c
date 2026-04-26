@@ -195,6 +195,34 @@ static GtkWidget *make_markup_label(const char *markup) {
     return GTK_WIDGET(lbl);
 }
 
+/* Wrap a widget in a chat bubble */
+static GtkWidget *make_bubble(GtkWidget *content, gboolean is_user) {
+    GtkBox *bubble = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
+    gtk_widget_add_css_class(GTK_WIDGET(bubble), "card");
+    gtk_widget_set_margin_start(GTK_WIDGET(bubble), 8);
+    gtk_widget_set_margin_end(GTK_WIDGET(bubble), 8);
+    gtk_widget_set_margin_top(GTK_WIDGET(bubble), 2);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(bubble), 2);
+    gtk_box_append(bubble, content);
+
+    /* Outer box for alignment */
+    GtkBox *row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
+    if (is_user) {
+        /* Right-aligned: spacer then bubble */
+        GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_hexpand(spacer, TRUE);
+        gtk_box_append(row, spacer);
+    }
+    gtk_box_append(row, GTK_WIDGET(bubble));
+    if (!is_user) {
+        /* Left-aligned: bubble then spacer */
+        GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_hexpand(spacer, TRUE);
+        gtk_box_append(row, spacer);
+    }
+    return GTK_WIDGET(row);
+}
+
 /* Render the full conversation into chat_box */
 static void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
     /* Clear chat_box */
@@ -214,25 +242,27 @@ static void render_conversation(QuickHelpWindow *qh, const char *partial_assista
 
     for (int i = 0; i < qh->msg_count; i++) {
         if (g_strcmp0(qh->messages[i].role, "user") == 0) {
+            GtkBox *msg_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
             /* Show images if present */
             if (qh->messages[i].image_count > 0)
-                gtk_box_append(qh->chat_box,
+                gtk_box_append(msg_box,
                     make_image_row(qh->messages[i].images,
                                    qh->messages[i].image_count));
             char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
-            char *markup = g_strdup_printf("<b>You:</b> %s", escaped);
-            gtk_box_append(qh->chat_box, make_markup_label(markup));
-            g_free(markup);
+            gtk_box_append(msg_box, make_markup_label(escaped));
             g_free(escaped);
+            gtk_box_append(qh->chat_box, make_bubble(GTK_WIDGET(msg_box), TRUE));
         } else {
             char *pango = markdown_to_pango_ex(qh->messages[i].content, &li);
-            gtk_box_append(qh->chat_box, make_markup_label(pango));
+            gtk_box_append(qh->chat_box,
+                make_bubble(make_markup_label(pango), FALSE));
             g_free(pango);
         }
     }
     if (partial_assistant) {
         char *pango = markdown_to_pango_ex(partial_assistant, &li);
-        gtk_box_append(qh->chat_box, make_markup_label(pango));
+        gtk_box_append(qh->chat_box,
+            make_bubble(make_markup_label(pango), FALSE));
         g_free(pango);
     }
 
@@ -836,6 +866,16 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
         "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code.");
 
     qh->system_prompt = g_string_free(prompt, FALSE);
+
+    /* Load CSS for chat bubbles */
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(css,
+        ".card { padding: 8px 12px; border-radius: 12px; "
+        "background: alpha(currentColor, 0.08); }");
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
 
     /* Create window */
     qh->window = GTK_WINDOW(gtk_application_window_new(app));
