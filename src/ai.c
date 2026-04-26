@@ -120,13 +120,43 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
 /*  JSON helpers for message building                                  */
 /* ------------------------------------------------------------------ */
 
-static JsonNode *make_simple_msg(const char *role, const char *content) {
+static JsonNode *make_msg(const char *role, const char *content,
+                          AiImage *images, int image_count) {
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "role");
     json_builder_add_string_value(b, role);
     json_builder_set_member_name(b, "content");
-    json_builder_add_string_value(b, content);
+
+    if (image_count > 0) {
+        /* Content blocks array: images first, then text */
+        json_builder_begin_array(b);
+        for (int i = 0; i < image_count; i++) {
+            json_builder_begin_object(b);
+            json_builder_set_member_name(b, "type");
+            json_builder_add_string_value(b, "image");
+            json_builder_set_member_name(b, "source");
+            json_builder_begin_object(b);
+            json_builder_set_member_name(b, "type");
+            json_builder_add_string_value(b, "base64");
+            json_builder_set_member_name(b, "media_type");
+            json_builder_add_string_value(b, images[i].media_type);
+            json_builder_set_member_name(b, "data");
+            json_builder_add_string_value(b, images[i].base64);
+            json_builder_end_object(b); /* source */
+            json_builder_end_object(b); /* image block */
+        }
+        json_builder_begin_object(b);
+        json_builder_set_member_name(b, "type");
+        json_builder_add_string_value(b, "text");
+        json_builder_set_member_name(b, "text");
+        json_builder_add_string_value(b, content);
+        json_builder_end_object(b);
+        json_builder_end_array(b);
+    } else {
+        json_builder_add_string_value(b, content);
+    }
+
     json_builder_end_object(b);
     JsonNode *n = json_builder_get_root(b);
     g_object_unref(b);
@@ -216,8 +246,10 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
     GPtrArray *msgs = g_ptr_array_new_with_free_func(
         (GDestroyNotify)json_node_unref);
     for (int i = 0; i < count; i++)
-        g_ptr_array_add(msgs, make_simple_msg(messages[i].role,
-                                              messages[i].content));
+        g_ptr_array_add(msgs, make_msg(messages[i].role,
+                                       messages[i].content,
+                                       messages[i].images,
+                                       messages[i].image_count));
 
     g_atomic_int_set(&self->cancel_requested, 0);
 

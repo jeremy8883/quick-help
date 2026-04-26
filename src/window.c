@@ -17,6 +17,21 @@ static const char *model_ids[] = {
 static const char *model_names[] = { "Haiku", "Sonnet", "Opus" };
 #define NUM_MODELS 3
 #define DEFAULT_MODEL_IDX 1 /* Sonnet */
+#define IMAGE_THUMB_SIZE 48
+
+typedef struct {
+    GdkTexture *texture;
+    char *media_type;
+    char *base64;
+} PendingImage;
+
+static void pending_image_free(gpointer data) {
+    PendingImage *img = data;
+    g_object_unref(img->texture);
+    g_free(img->media_type);
+    g_free(img->base64);
+    g_free(img);
+}
 
 struct _QuickHelpWindow {
     GtkWindow *window;
@@ -47,12 +62,19 @@ struct _QuickHelpWindow {
     gboolean stream_had_error;  /* protected by stream_lock */
     gboolean stream_cancelled;  /* protected by stream_lock */
     char *stream_error_msg;     /* protected by stream_lock */
+    GPtrArray *pending_images;  /* array of PendingImage* */
+    GtkBox *image_preview_box;  /* horizontal box for thumbnails */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
     for (int i = 0; i < qh->msg_count; i++) {
         g_free(qh->messages[i].role);
         g_free(qh->messages[i].content);
+        for (int j = 0; j < qh->messages[i].image_count; j++) {
+            g_free(qh->messages[i].images[j].media_type);
+            g_free(qh->messages[i].images[j].base64);
+        }
+        g_free(qh->messages[i].images);
     }
     qh->msg_count = 0;
 }
@@ -81,6 +103,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     g_mutex_clear(&qh->stream_lock);
     g_ptr_array_unref(qh->tab_items);
     g_array_unref(qh->tab_types);
+    g_ptr_array_unref(qh->pending_images);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
     system_context_free(qh->sys);
@@ -111,7 +134,14 @@ static void render_conversation(QuickHelpWindow *qh, const char *partial_assista
     for (int i = 0; i < qh->msg_count; i++) {
         if (g_strcmp0(qh->messages[i].role, "user") == 0) {
             char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
-            g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
+            if (qh->messages[i].image_count > 0)
+                g_string_append_printf(display,
+                    "<b>You:</b> <i>[%d image%s]</i> %s\n\n",
+                    qh->messages[i].image_count,
+                    qh->messages[i].image_count > 1 ? "s" : "",
+                    escaped);
+            else
+                g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
             g_free(escaped);
         } else {
             char *pango = markdown_to_pango_ex(qh->messages[i].content, &li);
@@ -166,9 +196,17 @@ static gboolean on_stream_update(gpointer data) {
             /* Remove the user message that triggered this error */
             if (qh->msg_count > 0) {
                 qh->msg_count--;
-                set_input_text(qh, qh->messages[qh->msg_count].content);
-                g_free(qh->messages[qh->msg_count].role);
-                g_free(qh->messages[qh->msg_count].content);
+                AiMessage *m = &qh->messages[qh->msg_count];
+                set_input_text(qh, m->content);
+                g_free(m->role);
+                g_free(m->content);
+                for (int j = 0; j < m->image_count; j++) {
+                    g_free(m->images[j].media_type);
+                    g_free(m->images[j].base64);
+                }
+                g_free(m->images);
+                m->images = NULL;
+                m->image_count = 0;
             }
             /* Show error in red label */
             char *markup = g_markup_printf_escaped(
@@ -297,10 +335,112 @@ static void on_stop_clicked(GtkButton *button, gpointer data) {
     cancel_stream(data);
 }
 
+/* Rebuild the image preview thumbnails from pending_images */
+static void rebuild_image_preview(QuickHelpWindow *qh) {
+    /* Remove all children */
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(qh->image_preview_box))))
+        gtk_box_remove(qh->image_preview_box, child);
+
+    for (guint i = 0; i < qh->pending_images->len; i++) {
+        PendingImage *img = g_ptr_array_index(qh->pending_images, i);
+        GtkWidget *picture = gtk_picture_new_for_paintable(
+            GDK_PAINTABLE(img->texture));
+        gtk_widget_set_size_request(picture, IMAGE_THUMB_SIZE, IMAGE_THUMB_SIZE);
+        gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
+        gtk_box_append(qh->image_preview_box, picture);
+    }
+
+    gtk_widget_set_visible(GTK_WIDGET(qh->image_preview_box),
+                           qh->pending_images->len > 0);
+}
+
+static void add_pending_image(QuickHelpWindow *qh, GdkTexture *texture,
+                              const char *media_type, char *base64) {
+    PendingImage *img = g_new0(PendingImage, 1);
+    img->texture = g_object_ref(texture);
+    img->media_type = g_strdup(media_type);
+    img->base64 = base64; /* takes ownership */
+    g_ptr_array_add(qh->pending_images, img);
+    rebuild_image_preview(qh);
+}
+
+/* Clipboard image read callback */
+static void on_clipboard_image_ready(GObject *source, GAsyncResult *res,
+                                     gpointer data) {
+    QuickHelpWindow *qh = data;
+    GdkTexture *texture = gdk_clipboard_read_texture_finish(
+        GDK_CLIPBOARD(source), res, NULL);
+    if (!texture) return;
+
+    GBytes *png = gdk_texture_save_to_png_bytes(texture);
+    char *base64 = g_base64_encode(g_bytes_get_data(png, NULL),
+                                   g_bytes_get_size(png));
+    g_bytes_unref(png);
+
+    add_pending_image(qh, texture, "image/png", base64);
+    g_object_unref(texture);
+}
+
+static const char *media_type_for_path(const char *path) {
+    if (g_str_has_suffix(path, ".png")) return "image/png";
+    if (g_str_has_suffix(path, ".jpg") || g_str_has_suffix(path, ".jpeg"))
+        return "image/jpeg";
+    if (g_str_has_suffix(path, ".gif")) return "image/gif";
+    if (g_str_has_suffix(path, ".webp")) return "image/webp";
+    return NULL;
+}
+
+static void add_image_from_file(QuickHelpWindow *qh, GFile *file) {
+    char *path = g_file_get_path(file);
+    if (!path) return;
+
+    const char *media_type = media_type_for_path(path);
+    if (!media_type) { g_free(path); return; }
+
+    gsize len;
+    char *data;
+    if (!g_file_get_contents(path, &data, &len, NULL)) {
+        g_free(path);
+        return;
+    }
+
+    char *base64 = g_base64_encode((const guchar *)data, len);
+    g_free(data);
+
+    GdkTexture *texture = gdk_texture_new_from_file(file, NULL);
+    if (!texture) { g_free(base64); g_free(path); return; }
+
+    add_pending_image(qh, texture, media_type, base64);
+    g_object_unref(texture);
+    g_free(path);
+}
+
+/* Drag & drop handler */
+static gboolean on_drop(GtkDropTarget *target, const GValue *value,
+                        double x, double y, gpointer data) {
+    (void)target; (void)x; (void)y;
+    QuickHelpWindow *qh = data;
+
+    if (G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) {
+        GSList *files = gdk_file_list_get_files(g_value_get_boxed(value));
+        for (GSList *l = files; l; l = l->next)
+            add_image_from_file(qh, G_FILE(l->data));
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static void on_submit(QuickHelpWindow *qh) {
     char *text = get_input_text(qh);
     g_strstrip(text);
-    if (!*text) { g_free(text); return; }
+    gboolean has_images = qh->pending_images->len > 0;
+    if (!*text && !has_images) { g_free(text); return; }
+    if (!*text) {
+        /* Images with no text: provide a default prompt */
+        g_free(text);
+        text = g_strdup("What's in this image?");
+    }
 
     qh->focused_link = -1;
     gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
@@ -310,6 +450,22 @@ static void on_submit(QuickHelpWindow *qh) {
     if (qh->msg_count >= MAX_MESSAGES) { g_free(text); return; }
     qh->messages[qh->msg_count].role = g_strdup("user");
     qh->messages[qh->msg_count].content = text; /* transfer ownership */
+
+    /* Transfer pending images to message */
+    if (has_images) {
+        int n = qh->pending_images->len;
+        qh->messages[qh->msg_count].images = g_new(AiImage, n);
+        qh->messages[qh->msg_count].image_count = n;
+        for (int i = 0; i < n; i++) {
+            PendingImage *pi = g_ptr_array_index(qh->pending_images, i);
+            qh->messages[qh->msg_count].images[i].media_type =
+                g_strdup(pi->media_type);
+            qh->messages[qh->msg_count].images[i].base64 =
+                g_strdup(pi->base64);
+        }
+        g_ptr_array_set_size(qh->pending_images, 0);
+        rebuild_image_preview(qh);
+    }
     qh->msg_count++;
 
     /* Clear input and show spinner */
@@ -396,6 +552,19 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
+    /* Ctrl+V: check for image in clipboard before text paste */
+    if (keyval == GDK_KEY_v && (state & GDK_CONTROL_MASK)) {
+        GdkClipboard *clip = gdk_display_get_clipboard(
+            gdk_display_get_default());
+        GdkContentFormats *formats = gdk_clipboard_get_formats(clip);
+        if (gdk_content_formats_contain_gtype(formats, GDK_TYPE_TEXTURE)) {
+            gdk_clipboard_read_texture_async(clip, NULL,
+                on_clipboard_image_ready, qh);
+            return TRUE;
+        }
+        return FALSE; /* let text view handle text paste */
+    }
+
     if (keyval == GDK_KEY_Escape) {
         gtk_window_close(qh->window);
         return TRUE;
@@ -417,6 +586,8 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         qh->expanded = FALSE;
         gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
         set_input_text(qh, "");
+        g_ptr_array_set_size(qh->pending_images, 0);
+        rebuild_image_preview(qh);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
         return TRUE;
     }
@@ -484,6 +655,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->focused_link = -1;
     qh->tab_items = g_ptr_array_new_with_free_func(g_free);
     qh->tab_types = g_array_new(FALSE, FALSE, sizeof(TabItemType));
+    qh->pending_images = g_ptr_array_new_with_free_func(pending_image_free);
 
     /* Wire up tool status notifications */
     backend->tool_status_cb = on_tool_status;
@@ -591,6 +763,18 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     g_signal_connect(qh->model_dropdown, "notify::selected",
                      G_CALLBACK(on_model_changed), qh);
     gtk_box_append(input_row, GTK_WIDGET(qh->model_dropdown));
+
+    /* Image preview bar (hidden until images are attached) */
+    qh->image_preview_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4));
+    gtk_widget_set_visible(GTK_WIDGET(qh->image_preview_box), FALSE);
+    gtk_box_append(qh->vbox, GTK_WIDGET(qh->image_preview_box));
+
+    /* Drag & drop target for image files */
+    GtkDropTarget *drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST,
+                                              GDK_ACTION_COPY);
+    g_signal_connect(drop, "drop", G_CALLBACK(on_drop), qh);
+    gtk_widget_add_controller(GTK_WIDGET(qh->window),
+                              GTK_EVENT_CONTROLLER(drop));
 
     /* Error label (hidden until an error occurs) */
     qh->error_label = GTK_LABEL(gtk_label_new(NULL));

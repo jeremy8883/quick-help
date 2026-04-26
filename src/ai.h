@@ -2,8 +2,15 @@
 #define AI_H
 
 typedef struct {
+    char *media_type;  /* "image/png", "image/jpeg", etc. */
+    char *base64;      /* base64-encoded image data */
+} AiImage;
+
+typedef struct {
     char *role;    /* "user" or "assistant" */
     char *content;
+    AiImage *images;   /* array of attached images, or NULL */
+    int image_count;
 } AiMessage;
 
 /* Streaming callback: called with each text delta, or NULL delta when done.
