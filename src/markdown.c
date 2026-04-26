@@ -2,6 +2,37 @@
 #include <glib.h>
 #include <string.h>
 
+/* Apply inline markdown formatting (bold, code) to an already-escaped line */
+static void append_inline_formatted(GString *out, const char *escaped) {
+    const char *s = escaped;
+    while (*s) {
+        /* Bold: **text** */
+        if (s[0] == '*' && s[1] == '*') {
+            const char *end = strstr(s + 2, "**");
+            if (end) {
+                g_string_append(out, "<b>");
+                g_string_append_len(out, s + 2, end - (s + 2));
+                g_string_append(out, "</b>");
+                s = end + 2;
+                continue;
+            }
+        }
+        /* Inline code: `text` */
+        if (s[0] == '`') {
+            const char *end = strchr(s + 1, '`');
+            if (end) {
+                g_string_append(out, "<tt>");
+                g_string_append_len(out, s + 1, end - (s + 1));
+                g_string_append(out, "</tt>");
+                s = end + 1;
+                continue;
+            }
+        }
+        g_string_append_c(out, *s);
+        s++;
+    }
+}
+
 /* Escape text for Pango markup, then apply markdown conversions */
 char *markdown_to_pango(const char *md) {
     if (!md || !*md) return g_strdup("");
@@ -19,31 +50,16 @@ char *markdown_to_pango(const char *md) {
 
         /* Code block toggle */
         if (g_str_has_prefix(line, "```")) {
-            if (!in_code_block) {
-                g_string_append(out, "<tt>");
-                in_code_block = TRUE;
-            } else {
-                g_string_append(out, "</tt>");
-                in_code_block = FALSE;
-            }
-            g_free(line);
-            p = *eol ? eol + 1 : eol;
-            continue;
-        }
-
-        if (in_code_block) {
+            in_code_block = !in_code_block;
+            g_string_append(out, in_code_block ? "<tt>" : "</tt>");
+        } else if (in_code_block) {
             /* Inside code block: just escape and append as monospace */
             char *escaped = g_markup_escape_text(line, -1);
             g_string_append(out, escaped);
             g_string_append_c(out, '\n');
             g_free(escaped);
-            g_free(line);
-            p = *eol ? eol + 1 : eol;
-            continue;
-        }
-
-        /* Heading: # text */
-        if (line[0] == '#') {
+        } else if (line[0] == '#') {
+            /* Heading: # text */
             const char *text = line;
             int level = 0;
             while (*text == '#') { text++; level++; }
@@ -55,63 +71,26 @@ char *markdown_to_pango(const char *md) {
                 g_string_append_printf(out, "<b>%s</b>", escaped);
             g_string_append_c(out, '\n');
             g_free(escaped);
-            g_free(line);
-            p = *eol ? eol + 1 : eol;
-            continue;
-        }
-
-        /* List item: - text or * text */
-        const char *trimmed = line;
-        while (*trimmed == ' ') trimmed++;
-        if ((*trimmed == '-' || *trimmed == '*') && trimmed[1] == ' ') {
-            int indent = trimmed - line;
-            const char *item_text = trimmed + 2;
-            char *escaped = g_markup_escape_text(item_text, -1);
-            for (int i = 0; i < indent; i++)
-                g_string_append_c(out, ' ');
-            g_string_append_printf(out, " \xe2\x80\xa2 %s\n", escaped);
-            g_free(escaped);
-            g_free(line);
-            p = *eol ? eol + 1 : eol;
-            continue;
-        }
-
-        /* Regular line: escape, then apply inline formatting */
-        char *escaped = g_markup_escape_text(line, -1);
-        GString *formatted = g_string_new(NULL);
-        const char *s = escaped;
-
-        while (*s) {
-            /* Bold: **text** */
-            if (s[0] == '*' && s[1] == '*') {
-                const char *end = strstr(s + 2, "**");
-                if (end) {
-                    g_string_append(formatted, "<b>");
-                    g_string_append_len(formatted, s + 2, end - (s + 2));
-                    g_string_append(formatted, "</b>");
-                    s = end + 2;
-                    continue;
-                }
+        } else {
+            /* Check for list item: - text or * text */
+            const char *trimmed = line;
+            while (*trimmed == ' ') trimmed++;
+            if ((*trimmed == '-' || *trimmed == '*') && trimmed[1] == ' ') {
+                int indent = trimmed - line;
+                char *escaped = g_markup_escape_text(trimmed + 2, -1);
+                for (int i = 0; i < indent; i++)
+                    g_string_append_c(out, ' ');
+                g_string_append_printf(out, " \xe2\x80\xa2 %s\n", escaped);
+                g_free(escaped);
+            } else {
+                /* Regular line: escape, then apply inline formatting */
+                char *escaped = g_markup_escape_text(line, -1);
+                append_inline_formatted(out, escaped);
+                g_string_append_c(out, '\n');
+                g_free(escaped);
             }
-            /* Inline code: `text` */
-            if (s[0] == '`') {
-                const char *end = strchr(s + 1, '`');
-                if (end) {
-                    g_string_append(formatted, "<tt>");
-                    g_string_append_len(formatted, s + 1, end - (s + 1));
-                    g_string_append(formatted, "</tt>");
-                    s = end + 1;
-                    continue;
-                }
-            }
-            g_string_append_c(formatted, *s);
-            s++;
         }
 
-        g_string_append(out, formatted->str);
-        g_string_append_c(out, '\n');
-        g_string_free(formatted, TRUE);
-        g_free(escaped);
         g_free(line);
         p = *eol ? eol + 1 : eol;
     }

@@ -268,8 +268,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
             .full_text = g_string_new(NULL),
         };
 
-        char auth[512];
-        snprintf(auth, sizeof(auth), "x-api-key: %s", cd->api_key);
+        char *auth = g_strdup_printf("x-api-key: %s", cd->api_key);
         struct curl_slist *hdrs = NULL;
         hdrs = curl_slist_append(hdrs, auth);
         hdrs = curl_slist_append(hdrs, "content-type: application/json");
@@ -289,6 +288,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
 
         curl_slist_free_all(hdrs);
         curl_easy_cleanup(curl);
+        g_free(auth);
         g_free(body);
         g_string_free(st.buf, TRUE);
 
