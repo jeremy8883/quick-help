@@ -723,7 +723,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
 
     GtkScrolledWindow *input_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
     gtk_scrolled_window_set_policy(input_scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_max_content_height(input_scroll, 80);
+    gtk_scrolled_window_set_max_content_height(input_scroll, 50);
     gtk_scrolled_window_set_propagate_natural_height(input_scroll, TRUE);
     gtk_widget_set_hexpand(GTK_WIDGET(input_scroll), TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(input_scroll), "frame");
