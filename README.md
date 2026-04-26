@@ -8,6 +8,8 @@ It's essentially an LLM wrapper which provides:
 - Can fetch and read web pages when it needs up-to-date information
 - Attach images with drag-and-drop or pasting from clipboard
 
+There's deliberately no history, since this app is designed for quick requests AI help. A chat history of a few hundred "how to do this" chats is not useful.
+
 This application has been specifically built for my own environment, Fedora with GNOME. If you'd like your own distro supported, create a GH issue.
 
 *Disclaimer: this codebase is vibe-coded, but I use the application personally, and am on-top of any bugs and UI concerns.*
