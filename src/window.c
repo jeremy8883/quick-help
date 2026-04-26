@@ -805,6 +805,17 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
+    /* Ctrl+Home/End: scroll to top/bottom */
+    if ((keyval == GDK_KEY_Home || keyval == GDK_KEY_End) &&
+        (state & GDK_CONTROL_MASK)) {
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+        if (keyval == GDK_KEY_Home)
+            gtk_adjustment_set_value(adj, gtk_adjustment_get_lower(adj));
+        else
+            scroll_to_bottom(qh);
+        return TRUE;
+    }
+
     if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down ||
          keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) &&
         (state & GDK_CONTROL_MASK)) {
