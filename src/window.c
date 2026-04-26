@@ -30,7 +30,8 @@ struct _QuickHelpWindow {
     gsize tool_status_start;    /* buf position before status text (G_MAXSIZE = none) */
     int focused_link;        /* currently focused link index (-1 = none) */
     int link_count;          /* total links in last render */
-    GPtrArray *link_urls;    /* unescaped URLs from last render */
+    GPtrArray *tab_items;    /* content for tabbable items (URLs or code text) */
+    GArray *tab_types;       /* TabItemType for each item */
     GtkLabel *error_label;   /* red error message below entry */
     gboolean stream_had_error; /* protected by stream_lock */
     char *stream_error_msg;    /* protected by stream_lock */
@@ -66,7 +67,8 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
         g_string_free(qh->streaming_buf, TRUE);
     g_free(qh->stream_error_msg);
     g_mutex_clear(&qh->stream_lock);
-    g_ptr_array_unref(qh->link_urls);
+    g_ptr_array_unref(qh->tab_items);
+    g_array_unref(qh->tab_types);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
     system_context_free(qh->sys);
@@ -84,12 +86,14 @@ static void expand_window(QuickHelpWindow *qh) {
 static void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
     GString *display = g_string_new(NULL);
 
-    /* Set up link tracking */
-    g_ptr_array_set_size(qh->link_urls, 0);
+    /* Set up tabbable-item tracking */
+    g_ptr_array_set_size(qh->tab_items, 0);
+    g_array_set_size(qh->tab_types, 0);
     MarkdownLinkInfo li = {
         .highlight_index = qh->focused_link,
         .current_link = 0,
-        .urls = qh->link_urls
+        .urls = qh->tab_items,
+        .types = qh->tab_types
     };
 
     for (int i = 0; i < qh->msg_count; i++) {
@@ -292,13 +296,22 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         gboolean empty = !*text;
         g_free(text);
 
-        /* If input is empty and a link is focused, open it */
+        /* If input is empty and an item is focused, activate it */
         if (empty && qh->focused_link >= 0 &&
-            qh->focused_link < (int)qh->link_urls->len) {
-            const char *url = g_ptr_array_index(qh->link_urls, qh->focused_link);
-            GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
-            gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
-            g_object_unref(launcher);
+            qh->focused_link < (int)qh->tab_items->len) {
+            TabItemType type = g_array_index(qh->tab_types, TabItemType,
+                                             qh->focused_link);
+            const char *content = g_ptr_array_index(qh->tab_items,
+                                                    qh->focused_link);
+            if (type == TAB_LINK) {
+                GtkUriLauncher *launcher = gtk_uri_launcher_new(content);
+                gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
+                g_object_unref(launcher);
+            } else {
+                GdkClipboard *clip = gdk_display_get_clipboard(
+                    gdk_display_get_default());
+                gdk_clipboard_set_text(clip, content);
+            }
             return TRUE;
         }
 
@@ -319,7 +332,8 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         g_mutex_unlock(&qh->stream_lock);
         gtk_label_set_markup(qh->response_label, "");
         gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
-        g_ptr_array_set_size(qh->link_urls, 0);
+        g_ptr_array_set_size(qh->tab_items, 0);
+        g_array_set_size(qh->tab_types, 0);
         qh->focused_link = -1;
         qh->link_count = 0;
         gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
@@ -380,7 +394,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     g_mutex_init(&qh->stream_lock);
     qh->tool_status_start = G_MAXSIZE;
     qh->focused_link = -1;
-    qh->link_urls = g_ptr_array_new_with_free_func(g_free);
+    qh->tab_items = g_ptr_array_new_with_free_func(g_free);
+    qh->tab_types = g_array_new(FALSE, FALSE, sizeof(TabItemType));
 
     /* Wire up tool status notifications */
     backend->tool_status_cb = on_tool_status;

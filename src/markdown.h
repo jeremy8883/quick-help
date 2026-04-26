@@ -3,13 +3,19 @@
 
 #include <glib.h>
 
-/* Link tracking/highlighting for extended markdown rendering.
+typedef enum {
+    TAB_LINK,
+    TAB_CODE_BLOCK
+} TabItemType;
+
+/* Tabbable-item tracking/highlighting for extended markdown rendering.
  * Initialize current_link to 0 before the first call.
- * The struct can be reused across multiple calls to accumulate links. */
+ * The struct can be reused across multiple calls to accumulate items. */
 typedef struct {
-    int highlight_index;  /* link index to highlight (-1 for none) */
-    int current_link;     /* running counter (init to 0) */
-    GPtrArray *urls;      /* if non-NULL, collects unescaped URLs */
+    int highlight_index;  /* item index to highlight (-1 for none) */
+    int current_link;     /* running counter for all tabbable items (init to 0) */
+    GPtrArray *urls;      /* if non-NULL, collects content (URLs for links, raw text for code) */
+    GArray *types;        /* if non-NULL, collects TabItemType for each item */
 } MarkdownLinkInfo;
 
 /* Convert basic markdown text to Pango markup.

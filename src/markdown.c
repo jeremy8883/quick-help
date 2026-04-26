@@ -20,14 +20,24 @@ static char *xml_unescape(const char *s, gsize len) {
     return g_string_free(out, FALSE);
 }
 
-/* Record a link: collect URL and increment counter */
-static void record_link(MarkdownLinkInfo *li, const char *url_escaped, gsize url_len) {
+/* Record a tabbable item and increment counter */
+static void record_item(MarkdownLinkInfo *li, TabItemType type,
+                        char *content /* takes ownership */) {
     if (!li) return;
-    if (li->urls) {
-        char *url = xml_unescape(url_escaped, url_len);
-        g_ptr_array_add(li->urls, url);
+    if (li->urls)
+        g_ptr_array_add(li->urls, content);
+    else
+        g_free(content);
+    if (li->types) {
+        TabItemType t = type;
+        g_array_append_val(li->types, t);
     }
     li->current_link++;
+}
+
+static void record_link(MarkdownLinkInfo *li, const char *url_escaped, gsize url_len) {
+    if (!li) return;
+    record_item(li, TAB_LINK, xml_unescape(url_escaped, url_len));
 }
 
 /* Check if the current link should be highlighted */
@@ -152,6 +162,8 @@ char *markdown_to_pango_ex(const char *md, MarkdownLinkInfo *info) {
     GString *out = g_string_new(NULL);
     const char *p = md;
     gboolean in_code_block = FALSE;
+    gboolean code_hl = FALSE;       /* whether current code block is highlighted */
+    GString *code_raw = NULL;       /* accumulates raw code block content */
 
     while (*p) {
         /* Find end of current line */
@@ -162,14 +174,36 @@ char *markdown_to_pango_ex(const char *md, MarkdownLinkInfo *info) {
 
         /* Code block toggle */
         if (g_str_has_prefix(line, "```")) {
-            in_code_block = !in_code_block;
-            g_string_append(out, in_code_block ? "<tt>" : "</tt>");
+            if (!in_code_block) {
+                in_code_block = TRUE;
+                code_raw = g_string_new(NULL);
+                code_hl = is_highlighted(info);
+                if (code_hl)
+                    g_string_append(out,
+                        "<span background=\"#3584e4\" foreground=\"white\">");
+                g_string_append(out, "<tt>");
+            } else {
+                in_code_block = FALSE;
+                g_string_append(out, "</tt>");
+                if (code_hl)
+                    g_string_append(out, "</span>");
+                /* Trim trailing newline from raw content */
+                if (code_raw->len > 0 &&
+                    code_raw->str[code_raw->len - 1] == '\n')
+                    g_string_truncate(code_raw, code_raw->len - 1);
+                record_item(info, TAB_CODE_BLOCK,
+                            g_string_free(code_raw, FALSE));
+                code_raw = NULL;
+            }
         } else if (in_code_block) {
             /* Inside code block: just escape and append as monospace */
             char *escaped = g_markup_escape_text(line, -1);
             g_string_append(out, escaped);
             g_string_append_c(out, '\n');
             g_free(escaped);
+            /* Accumulate raw content for copy */
+            g_string_append(code_raw, line);
+            g_string_append_c(code_raw, '\n');
         } else if (line[0] == '#') {
             /* Heading: # text */
             const char *text = line;
@@ -213,9 +247,14 @@ char *markdown_to_pango_ex(const char *md, MarkdownLinkInfo *info) {
         p = *eol ? eol + 1 : eol;
     }
 
-    /* Close unclosed code block */
-    if (in_code_block)
+    /* Close unclosed code block (e.g. during streaming) */
+    if (in_code_block) {
         g_string_append(out, "</tt>");
+        if (code_hl)
+            g_string_append(out, "</span>");
+        if (code_raw)
+            g_string_free(code_raw, TRUE);
+    }
 
     /* Remove trailing newline */
     if (out->len > 0 && out->str[out->len - 1] == '\n')
