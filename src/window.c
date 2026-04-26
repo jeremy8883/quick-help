@@ -27,6 +27,7 @@ struct _QuickHelpWindow {
     gboolean streaming;      /* TRUE while a response is being streamed */
     GMutex stream_lock;      /* protects streaming_buf */
     gboolean stream_ui_pending; /* whether an idle update is already queued */
+    gsize tool_status_start;    /* buf position before status text (G_MAXSIZE = none) */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -122,6 +123,11 @@ static void on_stream_chunk(const char *delta, const char *error,
     QuickHelpWindow *qh = user_data;
 
     g_mutex_lock(&qh->stream_lock);
+    /* Strip tool status indicator before appending new content */
+    if (qh->tool_status_start != G_MAXSIZE) {
+        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
+        qh->tool_status_start = G_MAXSIZE;
+    }
     if (error) {
         g_string_append_printf(qh->streaming_buf, "\n\n**Error:** %s", error);
         qh->streaming = FALSE;
@@ -131,6 +137,28 @@ static void on_stream_chunk(const char *delta, const char *error,
         /* NULL delta + NULL error = done */
         qh->streaming = FALSE;
     }
+    if (!qh->stream_ui_pending) {
+        qh->stream_ui_pending = TRUE;
+        g_idle_add(on_stream_update, qh);
+    }
+    g_mutex_unlock(&qh->stream_lock);
+}
+
+/* Tool status callback — called from the worker thread */
+static void on_tool_status(const char *tool_name, const char *detail,
+                           void *user_data) {
+    (void)tool_name;
+    QuickHelpWindow *qh = user_data;
+
+    g_mutex_lock(&qh->stream_lock);
+    /* Remove any previous status line first */
+    if (qh->tool_status_start != G_MAXSIZE)
+        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
+    /* Record position, then append status */
+    qh->tool_status_start = qh->streaming_buf->len;
+    char *status = g_strdup_printf("\n\n*Fetching %s\u2026*", detail);
+    g_string_append(qh->streaming_buf, status);
+    g_free(status);
     if (!qh->stream_ui_pending) {
         qh->stream_ui_pending = TRUE;
         g_idle_add(on_stream_update, qh);
@@ -179,6 +207,7 @@ static void on_submit(QuickHelpWindow *qh) {
         qh->streaming_buf = g_string_new(NULL);
     qh->streaming = TRUE;
     qh->stream_ui_pending = FALSE;
+    qh->tool_status_start = G_MAXSIZE;
     g_mutex_unlock(&qh->stream_lock);
 
     /* Send in background thread */
@@ -247,6 +276,11 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->info = info;
     qh->sys = sys;
     g_mutex_init(&qh->stream_lock);
+    qh->tool_status_start = G_MAXSIZE;
+
+    /* Wire up tool status notifications */
+    backend->tool_status_cb = on_tool_status;
+    backend->tool_status_data = qh;
 
     /* Build system prompt */
     GString *prompt = g_string_new(

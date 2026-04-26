@@ -302,8 +302,27 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
                 st.full_text->str, st.tool_calls, st.num_tools));
 
             char **results = g_new0(char *, st.num_tools);
-            for (int i = 0; i < st.num_tools; i++)
+            for (int i = 0; i < st.num_tools; i++) {
+                /* Notify UI about tool execution */
+                if (self->tool_status_cb) {
+                    char *detail = NULL;
+                    JsonParser *tp = json_parser_new();
+                    if (json_parser_load_from_data(tp,
+                            st.tool_calls[i].input_json->str, -1, NULL)) {
+                        JsonObject *inp = json_node_get_object(
+                            json_parser_get_root(tp));
+                        const char *url = json_object_get_string_member(
+                            inp, "url");
+                        if (url) detail = g_strdup(url);
+                    }
+                    g_object_unref(tp);
+                    self->tool_status_cb(st.tool_calls[i].name,
+                                         detail ? detail : "",
+                                         self->tool_status_data);
+                    g_free(detail);
+                }
                 results[i] = web_tool_execute(&st.tool_calls[i]);
+            }
 
             g_ptr_array_add(msgs, make_tool_result_msg(
                 st.tool_calls, st.num_tools, results));

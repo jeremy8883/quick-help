@@ -11,6 +11,11 @@ typedef struct {
 typedef void (*AiStreamCallback)(const char *delta, const char *error,
                                  void *user_data);
 
+/* Tool status callback: called when a tool starts executing.
+ * tool_name is e.g. "fetch_url", detail is e.g. the URL. Worker thread. */
+typedef void (*AiToolStatusCallback)(const char *tool_name, const char *detail,
+                                     void *user_data);
+
 typedef struct AiBackend AiBackend;
 
 struct AiBackend {
@@ -21,6 +26,10 @@ struct AiBackend {
                         AiStreamCallback cb, void *user_data);
     void (*destroy)(AiBackend *self);
     void *data; /* backend-private data */
+
+    /* Optional: called when a tool starts executing */
+    AiToolStatusCallback tool_status_cb;
+    void *tool_status_data;
 };
 
 /* Create a Claude API backend. api_key is copied internally. */
