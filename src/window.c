@@ -349,13 +349,22 @@ static gboolean on_stream_update(gpointer data) {
         gtk_text_view_set_editable(qh->text_view, TRUE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
     } else {
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+        double prev_val = gtk_adjustment_get_value(adj);
         gboolean was_at_bottom = is_scrolled_to_bottom(qh);
+        gboolean was_at_top = prev_val <= 0.0;
         render_conversation(qh, snapshot);
         g_free(snapshot);
-        /* Auto-scroll only if already at bottom and not at top */
-        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
-        if (was_at_bottom && gtk_adjustment_get_value(adj) > 0)
+        /* Pin scroll position during streaming:
+         * - at top (y=0): stay at top
+         * - at bottom: stay at bottom
+         * - in between: restore previous position */
+        if (was_at_top)
+            gtk_adjustment_set_value(adj, 0);
+        else if (was_at_bottom)
             scroll_to_bottom(qh);
+        else
+            gtk_adjustment_set_value(adj, prev_val);
     }
 
     return G_SOURCE_REMOVE;
