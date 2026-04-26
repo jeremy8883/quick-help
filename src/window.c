@@ -28,6 +28,9 @@ struct _QuickHelpWindow {
     GMutex stream_lock;      /* protects streaming_buf */
     gboolean stream_ui_pending; /* whether an idle update is already queued */
     gsize tool_status_start;    /* buf position before status text (G_MAXSIZE = none) */
+    int focused_link;        /* currently focused link index (-1 = none) */
+    int link_count;          /* total links in last render */
+    GPtrArray *link_urls;    /* unescaped URLs from last render */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -46,6 +49,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     if (qh->streaming_buf)
         g_string_free(qh->streaming_buf, TRUE);
     g_mutex_clear(&qh->stream_lock);
+    g_ptr_array_unref(qh->link_urls);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
     system_context_free(qh->sys);
@@ -62,27 +66,38 @@ static void expand_window(QuickHelpWindow *qh) {
 /* Render the full conversation to the label */
 static void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
     GString *display = g_string_new(NULL);
+
+    /* Set up link tracking */
+    g_ptr_array_set_size(qh->link_urls, 0);
+    MarkdownLinkInfo li = {
+        .highlight_index = qh->focused_link,
+        .current_link = 0,
+        .urls = qh->link_urls
+    };
+
     for (int i = 0; i < qh->msg_count; i++) {
         if (g_strcmp0(qh->messages[i].role, "user") == 0) {
             char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
             g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
             g_free(escaped);
         } else {
-            char *pango = markdown_to_pango(qh->messages[i].content);
+            char *pango = markdown_to_pango_ex(qh->messages[i].content, &li);
             g_string_append_printf(display, "%s\n\n", pango);
             g_free(pango);
         }
     }
     if (partial_assistant) {
-        char *pango = markdown_to_pango(partial_assistant);
+        char *pango = markdown_to_pango_ex(partial_assistant, &li);
         g_string_append_printf(display, "%s", pango);
         g_free(pango);
     }
+
+    qh->link_count = li.current_link;
+
     if (display->len > 2 && !partial_assistant)
         g_string_truncate(display, display->len - 2);
     gtk_label_set_markup(qh->response_label, display->str);
     g_string_free(display, TRUE);
-
 }
 
 /* Called on the main thread to update the UI with streaming content */
@@ -182,6 +197,7 @@ static void on_submit(QuickHelpWindow *qh) {
     const char *text = gtk_editable_get_text(GTK_EDITABLE(qh->entry));
     if (!text || !*text) return;
 
+    qh->focused_link = -1;
     expand_window(qh);
 
     /* Append user message */
@@ -216,7 +232,20 @@ static void on_submit(QuickHelpWindow *qh) {
 
 static void on_entry_activate(GtkEntry *entry, gpointer data) {
     (void)entry;
-    on_submit(data);
+    QuickHelpWindow *qh = data;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(qh->entry));
+
+    /* If entry is empty and a link is focused, open the link */
+    if ((!text || !*text) && qh->focused_link >= 0 &&
+        qh->focused_link < (int)qh->link_urls->len) {
+        const char *url = g_ptr_array_index(qh->link_urls, qh->focused_link);
+        GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
+        gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
+        g_object_unref(launcher);
+        return;
+    }
+
+    on_submit(qh);
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
@@ -237,11 +266,30 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
             g_string_truncate(qh->streaming_buf, 0);
         g_mutex_unlock(&qh->stream_lock);
         gtk_label_set_markup(qh->response_label, "");
+        g_ptr_array_set_size(qh->link_urls, 0);
+        qh->focused_link = -1;
+        qh->link_count = 0;
         gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
         qh->expanded = FALSE;
         gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
         gtk_editable_set_text(GTK_EDITABLE(qh->entry), "");
         gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+        return TRUE;
+    }
+
+    /* Tab / Shift+Tab: cycle through links */
+    if ((keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) &&
+        qh->link_count > 0 && !qh->streaming) {
+        if (keyval == GDK_KEY_ISO_Left_Tab || (state & GDK_SHIFT_MASK)) {
+            qh->focused_link--;
+            if (qh->focused_link < -1)
+                qh->focused_link = qh->link_count - 1;
+        } else {
+            qh->focused_link++;
+            if (qh->focused_link >= qh->link_count)
+                qh->focused_link = -1;
+        }
+        render_conversation(qh, NULL);
         return TRUE;
     }
 
@@ -277,6 +325,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->sys = sys;
     g_mutex_init(&qh->stream_lock);
     qh->tool_status_start = G_MAXSIZE;
+    qh->focused_link = -1;
+    qh->link_urls = g_ptr_array_new_with_free_func(g_free);
 
     /* Wire up tool status notifications */
     backend->tool_status_cb = on_tool_status;
