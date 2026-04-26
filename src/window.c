@@ -42,9 +42,11 @@ struct _QuickHelpWindow {
     GPtrArray *tab_items;    /* content for tabbable items (URLs or code text) */
     GArray *tab_types;       /* TabItemType for each item */
     GtkDropDown *model_dropdown;
+    GtkButton *stop_button;  /* shown during streaming */
     GtkLabel *error_label;   /* red error message below entry */
-    gboolean stream_had_error; /* protected by stream_lock */
-    char *stream_error_msg;    /* protected by stream_lock */
+    gboolean stream_had_error;  /* protected by stream_lock */
+    gboolean stream_cancelled;  /* protected by stream_lock */
+    char *stream_error_msg;     /* protected by stream_lock */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -140,11 +142,26 @@ static gboolean on_stream_update(gpointer data) {
     char *snapshot = g_strdup(qh->streaming_buf->str);
     gboolean done = !qh->streaming;
     gboolean had_error = qh->stream_had_error;
+    gboolean cancelled = qh->stream_cancelled;
     char *error_msg = had_error ? g_strdup(qh->stream_error_msg) : NULL;
     g_mutex_unlock(&qh->stream_lock);
 
     if (done) {
-        if (had_error) {
+        if (cancelled) {
+            /* Save partial content with interrupted marker */
+            if (qh->msg_count < MAX_MESSAGES) {
+                GString *content = g_string_new(snapshot);
+                if (content->len > 0)
+                    g_string_append(content, "\n\n");
+                g_string_append(content, "[request interrupted by user]");
+                qh->messages[qh->msg_count].role = g_strdup("assistant");
+                qh->messages[qh->msg_count].content =
+                    g_string_free(content, FALSE);
+                qh->msg_count++;
+            }
+            g_free(snapshot);
+            render_conversation(qh, NULL);
+        } else if (had_error) {
             g_free(snapshot);
             /* Remove the user message that triggered this error */
             if (qh->msg_count > 0) {
@@ -174,6 +191,7 @@ static gboolean on_stream_update(gpointer data) {
         }
         gtk_spinner_stop(qh->spinner);
         gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
+        gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
         gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), TRUE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
     } else {
@@ -190,6 +208,10 @@ static void on_stream_chunk(const char *delta, const char *error,
     QuickHelpWindow *qh = user_data;
 
     g_mutex_lock(&qh->stream_lock);
+    if (qh->stream_cancelled) {
+        g_mutex_unlock(&qh->stream_lock);
+        return;
+    }
     /* Strip tool status indicator before appending new content */
     if (qh->tool_status_start != G_MAXSIZE) {
         g_string_truncate(qh->streaming_buf, qh->tool_status_start);
@@ -248,6 +270,33 @@ static gpointer send_thread(gpointer data) {
     return NULL;
 }
 
+static void cancel_stream(QuickHelpWindow *qh) {
+    g_mutex_lock(&qh->stream_lock);
+    if (!qh->streaming) {
+        g_mutex_unlock(&qh->stream_lock);
+        return;
+    }
+    /* Strip any tool status indicator */
+    if (qh->tool_status_start != G_MAXSIZE) {
+        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
+        qh->tool_status_start = G_MAXSIZE;
+    }
+    qh->streaming = FALSE;
+    qh->stream_cancelled = TRUE;
+    if (!qh->stream_ui_pending) {
+        qh->stream_ui_pending = TRUE;
+        g_idle_add(on_stream_update, qh);
+    }
+    g_mutex_unlock(&qh->stream_lock);
+    /* Signal curl to abort */
+    g_atomic_int_set(&qh->backend->cancel_requested, 1);
+}
+
+static void on_stop_clicked(GtkButton *button, gpointer data) {
+    (void)button;
+    cancel_stream(data);
+}
+
 static void on_submit(QuickHelpWindow *qh) {
     char *text = get_input_text(qh);
     g_strstrip(text);
@@ -267,6 +316,7 @@ static void on_submit(QuickHelpWindow *qh) {
     set_input_text(qh, "");
     gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), FALSE);
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
+    gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), TRUE);
     gtk_spinner_start(qh->spinner);
 
     /* Show conversation with "Thinking..." */
@@ -280,6 +330,7 @@ static void on_submit(QuickHelpWindow *qh) {
         qh->streaming_buf = g_string_new(NULL);
     qh->streaming = TRUE;
     qh->stream_had_error = FALSE;
+    qh->stream_cancelled = FALSE;
     g_free(qh->stream_error_msg);
     qh->stream_error_msg = NULL;
     qh->stream_ui_pending = FALSE;
@@ -306,10 +357,16 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
 
-    /* Enter = submit, Shift+Enter = newline */
+    /* Enter = submit (or cancel if streaming), Shift+Enter = newline */
     if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
         if (state & GDK_SHIFT_MASK)
             return FALSE; /* let GtkTextView insert newline */
+
+        /* If streaming, Enter cancels */
+        if (qh->streaming) {
+            cancel_stream(qh);
+            return TRUE;
+        }
 
         char *text = get_input_text(qh);
         g_strstrip(text);
@@ -507,6 +564,12 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->spinner = GTK_SPINNER(gtk_spinner_new());
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
     gtk_box_append(input_row, GTK_WIDGET(qh->spinner));
+
+    qh->stop_button = GTK_BUTTON(gtk_button_new_with_label("Stop"));
+    gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
+    g_signal_connect(qh->stop_button, "clicked",
+                     G_CALLBACK(on_stop_clicked), qh);
+    gtk_box_append(input_row, GTK_WIDGET(qh->stop_button));
 
     /* Model selector dropdown */
     GtkStringList *model_list = gtk_string_list_new(model_names);

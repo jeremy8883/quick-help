@@ -20,6 +20,7 @@ typedef struct {
     int              num_tools;
     int              tool_cap;
     char            *stop_reason;
+    int             *cancel_flag;
 } StreamState;
 
 /* ------------------------------------------------------------------ */
@@ -107,6 +108,8 @@ static void process_sse_buffer(StreamState *st) {
 
 static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     StreamState *st = ud;
+    if (g_atomic_int_get(st->cancel_flag))
+        return 0; /* abort curl transfer */
     size_t total = size * nmemb;
     g_string_append_len(st->buf, ptr, total);
     process_sse_buffer(st);
@@ -216,6 +219,8 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         g_ptr_array_add(msgs, make_simple_msg(messages[i].role,
                                               messages[i].content));
 
+    g_atomic_int_set(&self->cancel_requested, 0);
+
     for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
 
         /* ---- Build request JSON ---- */
@@ -262,10 +267,11 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         }
 
         StreamState st = {
-            .cb        = cb,
-            .user_data = user_data,
-            .buf       = g_string_new(NULL),
-            .full_text = g_string_new(NULL),
+            .cb          = cb,
+            .user_data   = user_data,
+            .buf         = g_string_new(NULL),
+            .full_text   = g_string_new(NULL),
+            .cancel_flag = &self->cancel_requested,
         };
 
         char *auth = g_strdup_printf("x-api-key: %s", cd->api_key);
@@ -283,7 +289,8 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
         CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK)
+        gboolean cancelled = g_atomic_int_get(&self->cancel_requested);
+        if (res != CURLE_OK && !cancelled)
             cb(NULL, curl_easy_strerror(res), user_data);
 
         curl_slist_free_all(hdrs);
@@ -293,7 +300,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         g_string_free(st.buf, TRUE);
 
         /* ---- Handle tool calls ---- */
-        gboolean need_tools = st.stop_reason
+        gboolean need_tools = !cancelled && st.stop_reason
             && strcmp(st.stop_reason, "tool_use") == 0
             && st.num_tools > 0;
 
