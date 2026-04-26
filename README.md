@@ -45,12 +45,13 @@ chmod 600 ~/.config/environment.d/anthropic.conf
 
 Restart your machine for the variable to be picked up by your session (I'm sure there's an easier way).
 
-* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/). The free plan gives 2,000 queries/month. Add it to the same environment file:
+* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/). The free plan gives 2,000 queries/month.
 
 ```bash
-cat >> ~/.config/environment.d/anthropic.conf <<'EOF'
+cat > ~/.config/environment.d/brave-search.conf <<'EOF'
 BRAVE_SEARCH_API_KEY=BSA...
 EOF
+chmod 600 ~/.config/environment.d/brave-search.conf
 ```
 
 Without this key the app still works — it just won't offer web search to the AI (URL fetching still works).
