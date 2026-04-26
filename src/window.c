@@ -1,4 +1,5 @@
 #include "window.h"
+#include "system_context.h"
 #include "markdown.h"
 #include <string.h>
 
@@ -16,6 +17,7 @@ struct _QuickHelpWindow {
     GtkBox *vbox;
     AiBackend *backend;
     WindowInfo *info;
+    SystemContext *sys;
     AiMessage messages[MAX_MESSAGES];
     int msg_count;
     char *system_prompt;
@@ -37,6 +39,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     g_free(qh->system_prompt);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
+    system_context_free(qh->sys);
     g_free(qh);
 }
 
@@ -169,31 +172,44 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
 
 QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
-                                        WindowInfo *info) {
+                                        WindowInfo *info,
+                                        SystemContext *sys) {
     QuickHelpWindow *qh = g_new0(QuickHelpWindow, 1);
     qh->backend = backend;
     qh->info = info;
+    qh->sys = sys;
 
     /* Build system prompt */
-    if (info) {
-        qh->system_prompt = g_strdup_printf(
-            "You are a helpful assistant providing quick help for desktop applications. "
-            "The user is currently working in **%s** (window title: \"%s\"). "
-            "Give concise, actionable answers. "
-            "Prioritize keyboard shortcuts first, then menu navigation. "
-            "Keep responses brief - the user wants quick answers, not tutorials. "
-            "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code.",
-            info->app_name, info->title
-        );
-    } else {
-        qh->system_prompt = g_strdup(
-            "You are a helpful assistant providing quick help for desktop applications. "
-            "Give concise, actionable answers. "
-            "Prioritize keyboard shortcuts first, then menu navigation. "
-            "Keep responses brief - the user wants quick answers, not tutorials. "
-            "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code."
-        );
+    GString *prompt = g_string_new(
+        "You are a helpful assistant providing quick help for desktop applications. ");
+
+    /* System context */
+    if (sys) {
+        g_string_append_printf(prompt, "The user is running %s", sys->os_name);
+        if (sys->desktop_env)
+            g_string_append_printf(prompt, " with the %s desktop", sys->desktop_env);
+        if (sys->display_server)
+            g_string_append_printf(prompt, " on %s", sys->display_server);
+        g_string_append(prompt, ". ");
+        if (sys->shell)
+            g_string_append_printf(prompt,
+                "Their default shell is %s. ", sys->shell);
     }
+
+    /* Window context */
+    if (info) {
+        g_string_append_printf(prompt,
+            "The user is currently working in **%s** (window title: \"%s\"). ",
+            info->app_name, info->title);
+    }
+
+    g_string_append(prompt,
+        "Give concise, actionable answers. "
+        "Prioritize keyboard shortcuts first, then menu navigation. "
+        "Keep responses brief - the user wants quick answers, not tutorials. "
+        "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code.");
+
+    qh->system_prompt = g_string_free(prompt, FALSE);
 
     /* Create window */
     qh->window = GTK_WINDOW(gtk_application_window_new(app));
@@ -220,9 +236,19 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
 
     qh->entry = GTK_ENTRY(gtk_entry_new());
     if (info) {
-        char *placeholder = g_strdup_printf("Ask about %s...", info->app_name);
+        /* Use the last segment of wm_class (e.g. "com.mitchellh.ghostty" -> "Ghostty") */
+        const char *name = info->app_name;
+        const char *last_dot = strrchr(name, '.');
+        if (last_dot && *(last_dot + 1))
+            name = last_dot + 1;
+        char *display_name = g_strdup(name);
+        if (display_name[0])
+            display_name[0] = g_ascii_toupper(display_name[0]);
+
+        char *placeholder = g_strdup_printf("Ask about %s...", display_name);
         gtk_entry_set_placeholder_text(qh->entry, placeholder);
         g_free(placeholder);
+        g_free(display_name);
     } else {
         gtk_entry_set_placeholder_text(qh->entry, "Ask anything...");
     }

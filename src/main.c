@@ -2,6 +2,7 @@
 #include <curl/curl.h>
 #include "ai.h"
 #include "window_context.h"
+#include "system_context.h"
 #include "window.h"
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
@@ -26,11 +27,19 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         g_message("Could not detect focused window (window-calls extension may not be running)");
     }
 
+    /* Gather system context */
+    SystemContext *sys = detect_system_context();
+    g_message("System: %s, DE: %s, Display: %s, Shell: %s",
+              sys->os_name,
+              sys->desktop_env ? sys->desktop_env : "(unknown)",
+              sys->display_server ? sys->display_server : "(unknown)",
+              sys->shell ? sys->shell : "(unknown)");
+
     /* Create AI backend */
     AiBackend *backend = ai_claude_new(api_key);
 
     /* Create and show the window */
-    quick_help_window_new(app, backend, info);
+    quick_help_window_new(app, backend, info, sys);
 }
 
 int main(int argc, char *argv[]) {

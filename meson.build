@@ -12,6 +12,7 @@ src = files(
   'src/window.c',
   'src/ai.c',
   'src/window_context.c',
+  'src/system_context.c',
   'src/markdown.c',
 )
 
