@@ -406,14 +406,15 @@ static void on_stream_chunk(const char *delta, const char *error,
 
 static void on_tool_status(const char *tool_name, const char *detail,
                            void *user_data) {
-    (void)tool_name;
     QuickHelpWindow *qh = user_data;
+    const char *verb = (tool_name && strcmp(tool_name, "web_search") == 0)
+                       ? "Searching" : "Fetching";
 
     g_mutex_lock(&qh->stream_lock);
     if (qh->tool_status_start != G_MAXSIZE)
         g_string_truncate(qh->streaming_buf, qh->tool_status_start);
     qh->tool_status_start = qh->streaming_buf->len;
-    char *status = g_strdup_printf("\n\n*Fetching %s\u2026*", detail);
+    char *status = g_strdup_printf("\n\n*%s %s\u2026*", verb, detail);
     g_string_append(qh->streaming_buf, status);
     g_free(status);
     if (!qh->stream_ui_pending) {

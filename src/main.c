@@ -57,6 +57,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* Create AI backend */
     AiBackend *backend = ai_claude_new(api_key);
 
+    /* Optional: Brave Search API key for web search tool */
+    const char *brave_key = g_getenv("BRAVE_SEARCH_API_KEY");
+    if (brave_key && *brave_key)
+        backend->brave_api_key = g_strdup(brave_key);
+
     /* Create and show the window */
     quick_help_window_new(app, backend, info, sys, opt_no_decorations, opt_model);
 }

@@ -5,7 +5,7 @@ A tiny native Linux app that gives you instant AI help about whatever applicatio
 It's essentially an LLM wrapper which provides:
 - A quick, minimal interface, with everything keyboard accessible
 - Information about your OS and currently focused window is provided to the LLM, so you never need to ask "in Blender, how do I move items" - just ask "move objects"
-- Can fetch and read web pages when it needs up-to-date information
+- Can search the web and fetch pages when it needs up-to-date information
 - Attach images with drag-and-drop or pasting from clipboard
 
 There's deliberately no history, since this app is designed for quick requests AI help. A chat history of a few hundred "how to do this" chats is not useful.
@@ -44,6 +44,16 @@ chmod 600 ~/.config/environment.d/anthropic.conf
 ```
 
 Restart your machine for the variable to be picked up by your session (I'm sure there's an easier way).
+
+* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/). The free plan gives 2,000 queries/month. Add it to the same environment file:
+
+```bash
+cat >> ~/.config/environment.d/anthropic.conf <<'EOF'
+BRAVE_SEARCH_API_KEY=BSA...
+EOF
+```
+
+Without this key the app still works — it just won't offer web search to the AI (URL fetching still works).
 
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
 

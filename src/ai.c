@@ -1,5 +1,6 @@
 #include "ai.h"
 #include "ai_web_tool.h"
+#include "ai_search_tool.h"
 #include <curl/curl.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
@@ -235,6 +236,30 @@ static JsonNode *make_tool_result_msg(ToolCall *calls, int n, char **results) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Tool dispatch                                                      */
+/* ------------------------------------------------------------------ */
+
+static char *execute_tool(ToolCall *call, AiBackend *self) {
+    if (strcmp(call->name, "fetch_url") == 0)
+        return web_tool_execute(call);
+    if (strcmp(call->name, "web_search") == 0 && self->brave_api_key)
+        return search_tool_execute(call, self->brave_api_key);
+    return g_strdup_printf("Error: unknown tool '%s'", call->name);
+}
+
+typedef struct {
+    ToolCall  *call;
+    AiBackend *backend;
+    char      *result;
+} ToolExecArgs;
+
+static gpointer tool_exec_thread(gpointer data) {
+    ToolExecArgs *args = data;
+    args->result = execute_tool(args->call, args->backend);
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Claude send (with tool-use loop)                                   */
 /* ------------------------------------------------------------------ */
 
@@ -271,6 +296,8 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         json_builder_set_member_name(b, "tools");
         json_builder_begin_array(b);
         web_tool_add_definitions(b);
+        if (self->brave_api_key)
+            search_tool_add_definitions(b);
         json_builder_end_array(b);
 
         json_builder_set_member_name(b, "messages");
@@ -340,19 +367,20 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
             g_ptr_array_add(msgs, make_assistant_tool_msg(
                 st.full_text->str, st.tool_calls, st.num_tools));
 
-            char **results = g_new0(char *, st.num_tools);
-            for (int i = 0; i < st.num_tools; i++) {
-                /* Notify UI about tool execution */
-                if (self->tool_status_cb) {
+            /* Notify UI about all pending tool calls */
+            if (self->tool_status_cb) {
+                for (int i = 0; i < st.num_tools; i++) {
                     char *detail = NULL;
                     JsonParser *tp = json_parser_new();
                     if (json_parser_load_from_data(tp,
                             st.tool_calls[i].input_json->str, -1, NULL)) {
                         JsonObject *inp = json_node_get_object(
                             json_parser_get_root(tp));
-                        const char *url = json_object_get_string_member(
+                        const char *val = json_object_get_string_member(
                             inp, "url");
-                        if (url) detail = g_strdup(url);
+                        if (!val)
+                            val = json_object_get_string_member(inp, "query");
+                        if (val) detail = g_strdup(val);
                     }
                     g_object_unref(tp);
                     self->tool_status_cb(st.tool_calls[i].name,
@@ -360,7 +388,26 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
                                          self->tool_status_data);
                     g_free(detail);
                 }
-                results[i] = web_tool_execute(&st.tool_calls[i]);
+            }
+
+            /* Execute tool calls in parallel */
+            char **results = g_new0(char *, st.num_tools);
+            if (st.num_tools == 1) {
+                results[0] = execute_tool(&st.tool_calls[0], self);
+            } else {
+                ToolExecArgs *args = g_new0(ToolExecArgs, st.num_tools);
+                GThread **threads = g_new(GThread *, st.num_tools);
+                for (int i = 0; i < st.num_tools; i++) {
+                    args[i].call = &st.tool_calls[i];
+                    args[i].backend = self;
+                    threads[i] = g_thread_new(NULL, tool_exec_thread, &args[i]);
+                }
+                for (int i = 0; i < st.num_tools; i++) {
+                    g_thread_join(threads[i]);
+                    results[i] = args[i].result;
+                }
+                g_free(threads);
+                g_free(args);
             }
 
             g_ptr_array_add(msgs, make_tool_result_msg(
@@ -401,6 +448,7 @@ AiBackend *ai_claude_new(const char *api_key) {
 void ai_backend_free(AiBackend *backend) {
     if (!backend) return;
     g_free(backend->model);
+    g_free(backend->brave_api_key);
     if (backend->destroy)
         backend->destroy(backend);
     g_free(backend);

@@ -13,6 +13,7 @@ src = files(
   'src/input.c',
   'src/ai.c',
   'src/ai_web_tool.c',
+  'src/ai_search_tool.c',
   'src/utils/html.c',
   'src/window_context.c',
   'src/system_context.c',

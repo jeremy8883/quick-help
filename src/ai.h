@@ -39,6 +39,7 @@ struct AiBackend {
     void *tool_status_data;
 
     char *model; /* model ID string (e.g. "claude-sonnet-4-6") */
+    char *brave_api_key; /* optional Brave Search API key (NULL = no search tool) */
     int cancel_requested; /* set with g_atomic_int_set(1) to abort current stream */
 };
 
