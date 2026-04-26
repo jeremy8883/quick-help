@@ -14,7 +14,7 @@ static const char *model_ids[] = {
     "claude-sonnet-4-6",
     "claude-opus-4-6",
 };
-static const char *model_names[] = { "Haiku", "Sonnet", "Opus" };
+static const char *model_names[] = { "Haiku 4.5", "Sonnet 4.6", "Opus 4.6" };
 #define NUM_MODELS 3
 #define DEFAULT_MODEL_IDX 1 /* Sonnet */
 #define IMAGE_THUMB_SIZE 48
@@ -805,6 +805,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_drop_down_set_selected(qh->model_dropdown, default_idx);
     g_free(qh->backend->model);
     qh->backend->model = g_strdup(model_ids[default_idx]);
+    gtk_widget_set_size_request(GTK_WIDGET(qh->model_dropdown), 120, -1);
+    gtk_widget_set_valign(GTK_WIDGET(qh->model_dropdown), GTK_ALIGN_START);
     g_signal_connect(qh->model_dropdown, "notify::selected",
                      G_CALLBACK(on_model_changed), qh);
     gtk_box_append(input_row, GTK_WIDGET(qh->model_dropdown));
