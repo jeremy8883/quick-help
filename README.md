@@ -29,10 +29,26 @@ meson setup build
 ninja -C build
 ```
 
-* Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys), and add to your .bashrc/.zshrc:
+* Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys). GNOME shortcuts run from the systemd user session, not your shell, so an `export` in `.bashrc`/`.zshrc` won't be visible. Drop the key in `~/.config/environment.d/` instead:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+mkdir -p ~/.config/environment.d
+cat > ~/.config/environment.d/anthropic.conf <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...
+EOF
+chmod 600 ~/.config/environment.d/anthropic.conf
 ```
 
+Log out and back in for the variable to be picked up by your session.
+
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Enter` | Send the question |
+| `Esc` | Close the window |
+| `Ctrl+N` | Start a new conversation |
+| `Tab` / `Shift+Tab` | Cycle through links in the response |
+| `↑` / `↓` / `PgUp` / `PgDn` | Scroll the response |
