@@ -759,13 +759,6 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
 
-    /* Ctrl+Escape: cancel streaming */
-    if (keyval == GDK_KEY_Escape && (state & GDK_CONTROL_MASK)) {
-        if (qh->streaming)
-            cancel_stream(qh);
-        return TRUE;
-    }
-
     /* Enter = submit, Shift+Enter = newline */
     if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
         if (state & GDK_SHIFT_MASK)
@@ -853,20 +846,83 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
-    /* Tab / Shift+Tab: cycle through assistant bubbles */
-    if ((keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) &&
-        qh->bubble_count > 0 && !qh->streaming) {
-        if (keyval == GDK_KEY_ISO_Left_Tab || (state & GDK_SHIFT_MASK)) {
-            qh->focused_bubble--;
-            if (qh->focused_bubble < -1)
-                qh->focused_bubble = qh->bubble_count - 1;
-        } else {
-            qh->focused_bubble++;
-            if (qh->focused_bubble >= qh->bubble_count)
-                qh->focused_bubble = -1;
-        }
+    /* Ctrl+L: focus the input text view */
+    if (keyval == GDK_KEY_l && (state & GDK_CONTROL_MASK)) {
+        qh->focused_bubble = -1;
         render_conversation(qh, NULL);
+        gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
         return TRUE;
+    }
+
+    /* Tab / Shift+Tab: textbox -> dropdown -> chat bubbles -> textbox */
+    if ((keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) &&
+        !qh->streaming) {
+        gboolean backward = (keyval == GDK_KEY_ISO_Left_Tab ||
+                              (state & GDK_SHIFT_MASK));
+        GtkWidget *focus = gtk_window_get_focus(qh->window);
+        gboolean in_textview = (focus &&
+            (focus == GTK_WIDGET(qh->text_view) ||
+             gtk_widget_is_ancestor(focus, GTK_WIDGET(qh->text_view))));
+        gboolean in_dropdown = (focus &&
+            (focus == GTK_WIDGET(qh->model_dropdown) ||
+             gtk_widget_is_ancestor(focus, GTK_WIDGET(qh->model_dropdown))));
+
+        if (!backward) {
+            if (in_textview) {
+                /* textbox -> dropdown */
+                qh->focused_bubble = -1;
+                gtk_widget_grab_focus(GTK_WIDGET(qh->model_dropdown));
+                return TRUE;
+            } else if (in_dropdown) {
+                /* dropdown -> first chat bubble (or wrap to textbox) */
+                if (qh->bubble_count > 0) {
+                    qh->focused_bubble = 0;
+                    render_conversation(qh, NULL);
+                } else {
+                    gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
+                }
+                return TRUE;
+            } else if (qh->focused_bubble >= 0) {
+                /* cycling chat bubbles */
+                qh->focused_bubble++;
+                if (qh->focused_bubble >= qh->bubble_count) {
+                    qh->focused_bubble = -1;
+                    render_conversation(qh, NULL);
+                    gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
+                } else {
+                    render_conversation(qh, NULL);
+                }
+                return TRUE;
+            }
+        } else {
+            if (in_textview) {
+                /* textbox -> last chat bubble (or dropdown) */
+                if (qh->bubble_count > 0) {
+                    qh->focused_bubble = qh->bubble_count - 1;
+                    render_conversation(qh, NULL);
+                } else {
+                    gtk_widget_grab_focus(GTK_WIDGET(qh->model_dropdown));
+                }
+                return TRUE;
+            } else if (in_dropdown) {
+                /* dropdown -> textbox */
+                qh->focused_bubble = -1;
+                gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
+                return TRUE;
+            } else if (qh->focused_bubble >= 0) {
+                /* cycling chat bubbles backward */
+                qh->focused_bubble--;
+                if (qh->focused_bubble < 0) {
+                    qh->focused_bubble = -1;
+                    render_conversation(qh, NULL);
+                    gtk_widget_grab_focus(GTK_WIDGET(qh->model_dropdown));
+                } else {
+                    render_conversation(qh, NULL);
+                }
+                return TRUE;
+            }
+        }
+        /* fallthrough: let GTK handle Tab normally */
     }
 
     /* Ctrl+Alt+Up/Down: jump to prev/next user message */
@@ -908,16 +964,6 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                 gtk_adjustment_set_value(adj, out.y);
         }
         g_ptr_array_unref(user_widgets);
-        return TRUE;
-    }
-
-    /* Alt+Up/Down: cycle model */
-    if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_ALT_MASK)) {
-        guint idx = gtk_drop_down_get_selected(qh->model_dropdown);
-        if (keyval == GDK_KEY_Up && idx > 0)
-            gtk_drop_down_set_selected(qh->model_dropdown, idx - 1);
-        else if (keyval == GDK_KEY_Down && idx < NUM_MODELS - 1)
-            gtk_drop_down_set_selected(qh->model_dropdown, idx + 1);
         return TRUE;
     }
 
