@@ -873,6 +873,11 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
         "prioritize keyboard shortcuts first, then menu navigation, and keep it brief. "
         "For general questions unrelated to the app, answer normally without artificially constraining length. "
         "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code.");
+    if (!backend->brave_api_key)
+        g_string_append(prompt,
+            " You do not have web search capabilities. If the user needs web search, "
+            "tell them they can enable it by setting the BRAVE_SEARCH_API_KEY environment variable. "
+            "They can get an API key at https://api-dashboard.search.brave.com/app/keys");
     qh->system_prompt = g_string_free(prompt, FALSE);
 
     /* CSS */
