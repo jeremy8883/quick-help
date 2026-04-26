@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include <curl/curl.h>
 #include "ai.h"
+#include "config.h"
 #include "window_context.h"
 #include "system_context.h"
 #include "window.h"
@@ -43,11 +44,14 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
               sys->display_server ? sys->display_server : "(unknown)",
               sys->shell ? sys->shell : "(unknown)");
 
+    /* Load user configuration */
+    QuickHelpConfig *config = config_load();
+
     /* Create AI backend */
     AiBackend *backend = ai_claude_new(api_key);
 
     /* Create and show the window */
-    quick_help_window_new(app, backend, info, sys);
+    quick_help_window_new(app, backend, info, sys, config);
 }
 
 int main(int argc, char *argv[]) {

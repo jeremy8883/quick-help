@@ -3,6 +3,7 @@
 
 #include <gtk/gtk.h>
 #include "ai.h"
+#include "config.h"
 #include "window_context.h"
 #include "system_context.h"
 
@@ -13,6 +14,7 @@ typedef struct _QuickHelpWindow QuickHelpWindow;
 QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
                                         WindowInfo *info,
-                                        SystemContext *sys);
+                                        SystemContext *sys,
+                                        QuickHelpConfig *config);
 
 #endif
