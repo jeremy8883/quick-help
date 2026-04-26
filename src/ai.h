@@ -30,6 +30,8 @@ struct AiBackend {
     /* Optional: called when a tool starts executing */
     AiToolStatusCallback tool_status_cb;
     void *tool_status_data;
+
+    char *model; /* model ID string (e.g. "claude-sonnet-4-6") */
 };
 
 /* Create a Claude API backend. api_key is copied internally. */

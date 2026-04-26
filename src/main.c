@@ -13,10 +13,13 @@ static void on_alert_dismissed(GObject *source, GAsyncResult *res, gpointer user
 }
 
 static gboolean opt_no_decorations = FALSE;
+static char *opt_model = NULL;
 
 static GOptionEntry option_entries[] = {
     { "no-decorations", 0, 0, G_OPTION_ARG_NONE, &opt_no_decorations,
       "Hide window decorations (title bar)", NULL },
+    { "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
+      "Default model ID (e.g. claude-sonnet-4-6)", "MODEL" },
     { NULL }
 };
 
@@ -55,7 +58,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     AiBackend *backend = ai_claude_new(api_key);
 
     /* Create and show the window */
-    quick_help_window_new(app, backend, info, sys, opt_no_decorations);
+    quick_help_window_new(app, backend, info, sys, opt_no_decorations, opt_model);
 }
 
 int main(int argc, char *argv[]) {

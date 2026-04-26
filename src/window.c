@@ -9,6 +9,15 @@
 #define MAX_MESSAGES 50
 #define SCROLL_STEP 60.0
 
+static const char *model_ids[] = {
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+};
+static const char *model_names[] = { "Haiku", "Sonnet", "Opus" };
+#define NUM_MODELS 3
+#define DEFAULT_MODEL_IDX 1 /* Sonnet */
+
 struct _QuickHelpWindow {
     GtkWindow *window;
     GtkTextView *text_view;
@@ -32,6 +41,7 @@ struct _QuickHelpWindow {
     int link_count;          /* total links in last render */
     GPtrArray *tab_items;    /* content for tabbable items (URLs or code text) */
     GArray *tab_types;       /* TabItemType for each item */
+    GtkDropDown *model_dropdown;
     GtkLabel *error_label;   /* red error message below entry */
     gboolean stream_had_error; /* protected by stream_lock */
     char *stream_error_msg;    /* protected by stream_lock */
@@ -280,6 +290,16 @@ static void on_submit(QuickHelpWindow *qh) {
     g_thread_unref(g_thread_new("ai-stream", send_thread, qh));
 }
 
+static void on_model_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
+    (void)pspec;
+    QuickHelpWindow *qh = data;
+    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(obj));
+    if (idx < NUM_MODELS) {
+        g_free(qh->backend->model);
+        qh->backend->model = g_strdup(model_ids[idx]);
+    }
+}
+
 static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer data) {
@@ -360,6 +380,16 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
+    /* Alt+Up/Down: cycle model */
+    if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_ALT_MASK)) {
+        guint idx = gtk_drop_down_get_selected(qh->model_dropdown);
+        if (keyval == GDK_KEY_Up && idx > 0)
+            gtk_drop_down_set_selected(qh->model_dropdown, idx - 1);
+        else if (keyval == GDK_KEY_Down && idx < NUM_MODELS - 1)
+            gtk_drop_down_set_selected(qh->model_dropdown, idx + 1);
+        return TRUE;
+    }
+
     if (((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_CONTROL_MASK)) ||
         keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
         GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
@@ -386,7 +416,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
                                         WindowInfo *info,
                                         SystemContext *sys,
-                                        gboolean hide_decorations) {
+                                        gboolean hide_decorations,
+                                        const char *default_model) {
     QuickHelpWindow *qh = g_new0(QuickHelpWindow, 1);
     qh->backend = backend;
     qh->info = info;
@@ -476,6 +507,27 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->spinner = GTK_SPINNER(gtk_spinner_new());
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
     gtk_box_append(input_row, GTK_WIDGET(qh->spinner));
+
+    /* Model selector dropdown */
+    GtkStringList *model_list = gtk_string_list_new(model_names);
+    qh->model_dropdown = GTK_DROP_DOWN(gtk_drop_down_new(
+        G_LIST_MODEL(model_list), NULL));
+    /* Find default model index */
+    guint default_idx = DEFAULT_MODEL_IDX;
+    if (default_model) {
+        for (guint i = 0; i < NUM_MODELS; i++) {
+            if (strcmp(default_model, model_ids[i]) == 0) {
+                default_idx = i;
+                break;
+            }
+        }
+    }
+    gtk_drop_down_set_selected(qh->model_dropdown, default_idx);
+    g_free(qh->backend->model);
+    qh->backend->model = g_strdup(model_ids[default_idx]);
+    g_signal_connect(qh->model_dropdown, "notify::selected",
+                     G_CALLBACK(on_model_changed), qh);
+    gtk_box_append(input_row, GTK_WIDGET(qh->model_dropdown));
 
     /* Error label (hidden until an error occurs) */
     qh->error_label = GTK_LABEL(gtk_label_new(NULL));

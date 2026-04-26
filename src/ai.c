@@ -223,7 +223,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         json_builder_begin_object(b);
 
         json_builder_set_member_name(b, "model");
-        json_builder_add_string_value(b, "claude-sonnet-4-6");
+        json_builder_add_string_value(b, self->model);
         json_builder_set_member_name(b, "max_tokens");
         json_builder_add_int_value(b, 4096);
         json_builder_set_member_name(b, "stream");
@@ -355,11 +355,13 @@ AiBackend *ai_claude_new(const char *api_key) {
     backend->data = cd;
     backend->send_stream = claude_send_stream;
     backend->destroy = claude_destroy;
+    backend->model = g_strdup("claude-sonnet-4-6");
     return backend;
 }
 
 void ai_backend_free(AiBackend *backend) {
     if (!backend) return;
+    g_free(backend->model);
     if (backend->destroy)
         backend->destroy(backend);
     g_free(backend);

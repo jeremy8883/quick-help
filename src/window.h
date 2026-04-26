@@ -14,6 +14,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
                                         WindowInfo *info,
                                         SystemContext *sys,
-                                        gboolean hide_decorations);
+                                        gboolean hide_decorations,
+                                        const char *default_model);
 
 #endif
