@@ -32,14 +32,13 @@ ninja -C build
 * Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys). GNOME shortcuts run from the systemd user session, not your shell, so an `export` in `.bashrc`/`.zshrc` won't be visible. Drop the key in `~/.config/environment.d/` instead:
 
 ```bash
-mkdir -p ~/.config/environment.d
 cat > ~/.config/environment.d/anthropic.conf <<'EOF'
 ANTHROPIC_API_KEY=sk-ant-...
 EOF
 chmod 600 ~/.config/environment.d/anthropic.conf
 ```
 
-Log out and back in for the variable to be picked up by your session.
+Restart your machine for the variable to be picked up by your session (I'm sure there's an easier way).
 
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
 
