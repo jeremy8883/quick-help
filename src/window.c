@@ -65,6 +65,7 @@ struct _QuickHelpWindow {
     GPtrArray *pending_images;  /* array of PendingImage* */
     GtkBox *image_preview_box;  /* horizontal box for thumbnails */
     GtkButton *scroll_to_bottom; /* floating chevron button */
+    GtkWidget *drop_overlay;     /* "Drop images here" overlay */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -529,11 +530,26 @@ static void add_image_from_file(QuickHelpWindow *qh, GFile *file) {
     g_free(path);
 }
 
-/* Drag & drop handler */
+/* Drag & drop handlers */
+static GdkDragAction on_drop_enter(GtkDropTarget *target, double x, double y,
+                                   gpointer data) {
+    (void)target; (void)x; (void)y;
+    QuickHelpWindow *qh = data;
+    gtk_widget_set_visible(qh->drop_overlay, TRUE);
+    return GDK_ACTION_COPY;
+}
+
+static void on_drop_leave(GtkDropTarget *target, gpointer data) {
+    (void)target;
+    QuickHelpWindow *qh = data;
+    gtk_widget_set_visible(qh->drop_overlay, FALSE);
+}
+
 static gboolean on_drop(GtkDropTarget *target, const GValue *value,
                         double x, double y, gpointer data) {
     (void)target; (void)x; (void)y;
     QuickHelpWindow *qh = data;
+    gtk_widget_set_visible(qh->drop_overlay, FALSE);
 
     if (G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST)) {
         GSList *files = gdk_file_list_get_files(g_value_get_boxed(value));
@@ -735,47 +751,37 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         /* Find the user message widgets in chat_box */
         GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
         GPtrArray *user_widgets = g_ptr_array_new();
-        int widget_idx = 0;
         for (int i = 0; i < qh->msg_count && child; i++) {
-            if (g_strcmp0(qh->messages[i].role, "user") == 0) {
-                /* Skip image row if present */
-                if (qh->messages[i].image_count > 0) {
-                    child = gtk_widget_get_next_sibling(child);
-                }
+            if (g_strcmp0(qh->messages[i].role, "user") == 0)
                 g_ptr_array_add(user_widgets, child);
-            }
             child = gtk_widget_get_next_sibling(child);
         }
         if (user_widgets->len > 0) {
             GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
             double cur = gtk_adjustment_get_value(adj);
             GtkWidget *target = NULL;
+            graphene_point_t p = GRAPHENE_POINT_INIT(0, 0);
+            graphene_point_t out;
 
             if (keyval == GDK_KEY_Down) {
-                /* Find first user message below current scroll position */
                 for (guint i = 0; i < user_widgets->len; i++) {
                     GtkWidget *w = g_ptr_array_index(user_widgets, i);
-                    double wy;
-                    gtk_widget_translate_coordinates(w,
-                        GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
-                    if (wy > cur + 1.0) { target = w; break; }
+                    if (gtk_widget_compute_point(w, GTK_WIDGET(qh->chat_box),
+                                                 &p, &out) &&
+                        out.y > cur + 1.0) { target = w; break; }
                 }
             } else {
-                /* Find last user message above current scroll position */
                 for (int i = user_widgets->len - 1; i >= 0; i--) {
                     GtkWidget *w = g_ptr_array_index(user_widgets, i);
-                    double wy;
-                    gtk_widget_translate_coordinates(w,
-                        GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
-                    if (wy < cur - 1.0) { target = w; break; }
+                    if (gtk_widget_compute_point(w, GTK_WIDGET(qh->chat_box),
+                                                 &p, &out) &&
+                        out.y < cur - 1.0) { target = w; break; }
                 }
             }
-            if (target) {
-                double wy;
-                gtk_widget_translate_coordinates(target,
-                    GTK_WIDGET(qh->chat_box), 0, 0, NULL, &wy);
-                gtk_adjustment_set_value(adj, wy);
-            }
+            if (target &&
+                gtk_widget_compute_point(target, GTK_WIDGET(qh->chat_box),
+                                         &p, &out))
+                gtk_adjustment_set_value(adj, out.y);
         }
         g_ptr_array_unref(user_widgets);
         return TRUE;
@@ -892,13 +898,24 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_key_pressed), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->window), key_ctrl);
 
-    /* Main vertical box */
+    /* Main vertical box inside a top-level overlay (for drop indicator) */
+    GtkOverlay *window_overlay = GTK_OVERLAY(gtk_overlay_new());
+    gtk_window_set_child(qh->window, GTK_WIDGET(window_overlay));
+
     qh->vbox = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 6));
     gtk_widget_set_margin_start(GTK_WIDGET(qh->vbox), 8);
     gtk_widget_set_margin_end(GTK_WIDGET(qh->vbox), 8);
     gtk_widget_set_margin_top(GTK_WIDGET(qh->vbox), 8);
     gtk_widget_set_margin_bottom(GTK_WIDGET(qh->vbox), 8);
-    gtk_window_set_child(qh->window, GTK_WIDGET(qh->vbox));
+    gtk_overlay_set_child(window_overlay, GTK_WIDGET(qh->vbox));
+
+    /* Drop overlay label */
+    qh->drop_overlay = gtk_label_new("Drop images here");
+    gtk_widget_add_css_class(qh->drop_overlay, "osd");
+    gtk_widget_set_halign(qh->drop_overlay, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(qh->drop_overlay, GTK_ALIGN_FILL);
+    gtk_widget_set_visible(qh->drop_overlay, FALSE);
+    gtk_overlay_add_overlay(window_overlay, qh->drop_overlay);
 
     /* Input row: entry + spinner */
     GtkBox *input_row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6));
@@ -958,6 +975,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     /* Drag & drop target for image files */
     GtkDropTarget *drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST,
                                               GDK_ACTION_COPY);
+    g_signal_connect(drop, "enter", G_CALLBACK(on_drop_enter), qh);
+    g_signal_connect(drop, "leave", G_CALLBACK(on_drop_leave), qh);
     g_signal_connect(drop, "drop", G_CALLBACK(on_drop), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->window),
                               GTK_EVENT_CONTROLLER(drop));
