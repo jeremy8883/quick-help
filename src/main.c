@@ -1,7 +1,7 @@
 #include <gtk/gtk.h>
 #include <curl/curl.h>
 #include "ai.h"
-#include "detect.h"
+#include "window_context.h"
 #include "window.h"
 
 static void on_activate(GtkApplication *app, gpointer user_data) {

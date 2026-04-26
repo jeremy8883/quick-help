@@ -1,4 +1,4 @@
-#include "detect.h"
+#include "window_context.h"
 #include <gio/gio.h>
 #include <json-glib/json-glib.h>
 #include <string.h>

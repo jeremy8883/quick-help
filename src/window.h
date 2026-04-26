@@ -3,7 +3,7 @@
 
 #include <gtk/gtk.h>
 #include "ai.h"
-#include "detect.h"
+#include "window_context.h"
 
 typedef struct _QuickHelpWindow QuickHelpWindow;
 

@@ -1,5 +1,5 @@
-#ifndef DETECT_H
-#define DETECT_H
+#ifndef WINDOW_CONTEXT_H
+#define WINDOW_CONTEXT_H
 
 typedef struct {
     char *app_name;   /* wm_class e.g. "Blender" */
