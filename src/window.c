@@ -31,6 +31,9 @@ struct _QuickHelpWindow {
     int focused_link;        /* currently focused link index (-1 = none) */
     int link_count;          /* total links in last render */
     GPtrArray *link_urls;    /* unescaped URLs from last render */
+    GtkLabel *error_label;   /* red error message below entry */
+    gboolean stream_had_error; /* protected by stream_lock */
+    char *stream_error_msg;    /* protected by stream_lock */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -48,6 +51,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     g_free(qh->system_prompt);
     if (qh->streaming_buf)
         g_string_free(qh->streaming_buf, TRUE);
+    g_free(qh->stream_error_msg);
     g_mutex_clear(&qh->stream_lock);
     g_ptr_array_unref(qh->link_urls);
     ai_backend_free(qh->backend);
@@ -108,18 +112,40 @@ static gboolean on_stream_update(gpointer data) {
     qh->stream_ui_pending = FALSE;
     char *snapshot = g_strdup(qh->streaming_buf->str);
     gboolean done = !qh->streaming;
+    gboolean had_error = qh->stream_had_error;
+    char *error_msg = had_error ? g_strdup(qh->stream_error_msg) : NULL;
     g_mutex_unlock(&qh->stream_lock);
 
     if (done) {
-        /* Finalize: store message and reset */
-        if (qh->msg_count < MAX_MESSAGES) {
-            qh->messages[qh->msg_count].role = g_strdup("assistant");
-            qh->messages[qh->msg_count].content = snapshot;
-            qh->msg_count++;
-        } else {
+        if (had_error) {
             g_free(snapshot);
+            /* Remove the user message that triggered this error */
+            if (qh->msg_count > 0) {
+                qh->msg_count--;
+                gtk_editable_set_text(GTK_EDITABLE(qh->entry),
+                                      qh->messages[qh->msg_count].content);
+                g_free(qh->messages[qh->msg_count].role);
+                g_free(qh->messages[qh->msg_count].content);
+            }
+            /* Show error in red label */
+            char *markup = g_markup_printf_escaped(
+                "<span foreground=\"red\">%s</span>", error_msg);
+            gtk_label_set_markup(qh->error_label, markup);
+            gtk_widget_set_visible(GTK_WIDGET(qh->error_label), TRUE);
+            g_free(markup);
+            g_free(error_msg);
+            render_conversation(qh, NULL);
+        } else {
+            /* Finalize: store message and reset */
+            if (qh->msg_count < MAX_MESSAGES) {
+                qh->messages[qh->msg_count].role = g_strdup("assistant");
+                qh->messages[qh->msg_count].content = snapshot;
+                qh->msg_count++;
+            } else {
+                g_free(snapshot);
+            }
+            render_conversation(qh, NULL);
         }
-        render_conversation(qh, NULL);
         gtk_spinner_stop(qh->spinner);
         gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
         gtk_widget_set_sensitive(GTK_WIDGET(qh->entry), TRUE);
@@ -145,6 +171,9 @@ static void on_stream_chunk(const char *delta, const char *error,
     }
     if (error) {
         g_string_append_printf(qh->streaming_buf, "\n\n**Error:** %s", error);
+        qh->stream_had_error = TRUE;
+        g_free(qh->stream_error_msg);
+        qh->stream_error_msg = g_strdup(error);
         qh->streaming = FALSE;
     } else if (delta) {
         g_string_append(qh->streaming_buf, delta);
@@ -198,6 +227,7 @@ static void on_submit(QuickHelpWindow *qh) {
     if (!text || !*text) return;
 
     qh->focused_link = -1;
+    gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
     expand_window(qh);
 
     /* Append user message */
@@ -222,6 +252,9 @@ static void on_submit(QuickHelpWindow *qh) {
     else
         qh->streaming_buf = g_string_new(NULL);
     qh->streaming = TRUE;
+    qh->stream_had_error = FALSE;
+    g_free(qh->stream_error_msg);
+    qh->stream_error_msg = NULL;
     qh->stream_ui_pending = FALSE;
     qh->tool_status_start = G_MAXSIZE;
     g_mutex_unlock(&qh->stream_lock);
@@ -266,6 +299,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
             g_string_truncate(qh->streaming_buf, 0);
         g_mutex_unlock(&qh->stream_lock);
         gtk_label_set_markup(qh->response_label, "");
+        gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
         g_ptr_array_set_size(qh->link_urls, 0);
         qh->focused_link = -1;
         qh->link_count = 0;
@@ -418,6 +452,13 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->spinner = GTK_SPINNER(gtk_spinner_new());
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
     gtk_box_append(input_row, GTK_WIDGET(qh->spinner));
+
+    /* Error label (hidden until an error occurs) */
+    qh->error_label = GTK_LABEL(gtk_label_new(NULL));
+    gtk_label_set_wrap(qh->error_label, TRUE);
+    gtk_label_set_xalign(qh->error_label, 0.0);
+    gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
+    gtk_box_append(qh->vbox, GTK_WIDGET(qh->error_label));
 
     /* Scrolled response area (hidden initially) */
     qh->scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
