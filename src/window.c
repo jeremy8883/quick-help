@@ -36,7 +36,7 @@ static void pending_image_free(gpointer data) {
 struct _QuickHelpWindow {
     GtkWindow *window;
     GtkTextView *text_view;
-    GtkLabel *response_label;
+    GtkBox *chat_box;           /* vertical box inside scroll for messages */
     GtkScrolledWindow *scroll;
     GtkSpinner *spinner;
     GtkBox *vbox;
@@ -117,9 +117,53 @@ static void expand_window(QuickHelpWindow *qh) {
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, EXPANDED_HEIGHT);
 }
 
-/* Render the full conversation to the label */
+/* Create a texture from base64-encoded image data */
+static GdkTexture *texture_from_base64(const char *base64) {
+    gsize len;
+    guchar *data = g_base64_decode(base64, &len);
+    GBytes *bytes = g_bytes_new_take(data, len);
+    GdkTexture *tex = gdk_texture_new_from_bytes(bytes, NULL);
+    g_bytes_unref(bytes);
+    return tex; /* may be NULL on decode failure */
+}
+
+/* Build a horizontal scrolled row of image thumbnails */
+static GtkWidget *make_image_row(AiImage *images, int count) {
+    GtkScrolledWindow *sw = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    gtk_scrolled_window_set_policy(sw, GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    gtk_scrolled_window_set_propagate_natural_width(sw, TRUE);
+
+    GtkBox *row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4));
+    for (int i = 0; i < count; i++) {
+        GdkTexture *tex = texture_from_base64(images[i].base64);
+        if (!tex) continue;
+        GtkWidget *pic = gtk_picture_new_for_paintable(GDK_PAINTABLE(tex));
+        gtk_widget_set_size_request(pic, IMAGE_THUMB_SIZE, IMAGE_THUMB_SIZE);
+        gtk_picture_set_content_fit(GTK_PICTURE(pic), GTK_CONTENT_FIT_COVER);
+        gtk_widget_set_overflow(pic, GTK_OVERFLOW_HIDDEN);
+        gtk_box_append(row, pic);
+        g_object_unref(tex);
+    }
+    gtk_scrolled_window_set_child(sw, GTK_WIDGET(row));
+    return GTK_WIDGET(sw);
+}
+
+/* Helper: create a selectable, wrapping label from Pango markup */
+static GtkWidget *make_markup_label(const char *markup) {
+    GtkLabel *lbl = GTK_LABEL(gtk_label_new(NULL));
+    gtk_label_set_markup(lbl, markup);
+    gtk_label_set_wrap(lbl, TRUE);
+    gtk_label_set_xalign(lbl, 0.0);
+    gtk_label_set_selectable(lbl, TRUE);
+    return GTK_WIDGET(lbl);
+}
+
+/* Render the full conversation into chat_box */
 static void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
-    GString *display = g_string_new(NULL);
+    /* Clear chat_box */
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box))))
+        gtk_box_remove(qh->chat_box, child);
 
     /* Set up tabbable-item tracking */
     g_ptr_array_set_size(qh->tab_items, 0);
@@ -133,34 +177,29 @@ static void render_conversation(QuickHelpWindow *qh, const char *partial_assista
 
     for (int i = 0; i < qh->msg_count; i++) {
         if (g_strcmp0(qh->messages[i].role, "user") == 0) {
-            char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
+            /* Show images if present */
             if (qh->messages[i].image_count > 0)
-                g_string_append_printf(display,
-                    "<b>You:</b> <i>[%d image%s]</i> %s\n\n",
-                    qh->messages[i].image_count,
-                    qh->messages[i].image_count > 1 ? "s" : "",
-                    escaped);
-            else
-                g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
+                gtk_box_append(qh->chat_box,
+                    make_image_row(qh->messages[i].images,
+                                   qh->messages[i].image_count));
+            char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
+            char *markup = g_strdup_printf("<b>You:</b> %s", escaped);
+            gtk_box_append(qh->chat_box, make_markup_label(markup));
+            g_free(markup);
             g_free(escaped);
         } else {
             char *pango = markdown_to_pango_ex(qh->messages[i].content, &li);
-            g_string_append_printf(display, "%s\n\n", pango);
+            gtk_box_append(qh->chat_box, make_markup_label(pango));
             g_free(pango);
         }
     }
     if (partial_assistant) {
         char *pango = markdown_to_pango_ex(partial_assistant, &li);
-        g_string_append_printf(display, "%s", pango);
+        gtk_box_append(qh->chat_box, make_markup_label(pango));
         g_free(pango);
     }
 
     qh->link_count = li.current_link;
-
-    if (display->len > 2 && !partial_assistant)
-        g_string_truncate(display, display->len - 2);
-    gtk_label_set_markup(qh->response_label, display->str);
-    g_string_free(display, TRUE);
 }
 
 /* Called on the main thread to update the UI with streaming content */
@@ -576,7 +615,12 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         if (qh->streaming_buf)
             g_string_truncate(qh->streaming_buf, 0);
         g_mutex_unlock(&qh->stream_lock);
-        gtk_label_set_markup(qh->response_label, "");
+        /* Clear chat_box */
+        {
+            GtkWidget *c;
+            while ((c = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box))))
+                gtk_box_remove(qh->chat_box, c);
+        }
         gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
         g_ptr_array_set_size(qh->tab_items, 0);
         g_array_set_size(qh->tab_types, 0);
@@ -791,12 +835,10 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
     gtk_box_append(qh->vbox, GTK_WIDGET(qh->scroll));
 
-    qh->response_label = GTK_LABEL(gtk_label_new(NULL));
-    gtk_label_set_wrap(qh->response_label, TRUE);
-    gtk_label_set_xalign(qh->response_label, 0.0);
-    gtk_label_set_yalign(qh->response_label, 0.0);
-    gtk_label_set_selectable(qh->response_label, TRUE);
-    gtk_scrolled_window_set_child(qh->scroll, GTK_WIDGET(qh->response_label));
+    qh->chat_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8));
+    gtk_widget_set_margin_top(GTK_WIDGET(qh->chat_box), 4);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(qh->chat_box), 4);
+    gtk_scrolled_window_set_child(qh->scroll, GTK_WIDGET(qh->chat_box));
 
     g_signal_connect(qh->window, "destroy", G_CALLBACK(on_destroy), qh);
 
