@@ -6,6 +6,7 @@ It's essentially an LLM wrapper which provides:
 - A quick, minimal interface, with everything keyboard accessible
 - Information about your OS and currently focused window is provided to the LLM, so you never need to ask "in Blender, how do I move items" - just ask "move objects"
 - Can fetch and read web pages when it needs up-to-date information
+- Attach images with drag-and-drop or pasting from clipboard
 
 This application has been specifically built for my own environment, Fedora with GNOME. If you'd like your own distro supported, create a GH issue.
 
