@@ -9,6 +9,8 @@ It's essentially an LLM wrapper which provides:
 
 This application has been specifically built for my own environment, Fedora with GNOME. If you'd like your own distro supported, create a GH issue.
 
+*Disclaimer: this codebase is vibe-coded, but I use the application personally, and am on-top of any bugs and UI concerns.*
+
 ## Build and Install
 
 * Install the [window-calls](https://github.com/ickyicky/window-calls) GNOME extension, which is used to detect the currently focused window.
