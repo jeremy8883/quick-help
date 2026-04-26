@@ -41,4 +41,4 @@ Then bind it to a keyboard shortcut:
 ## Requirements
 
 - GNOME with [window-calls](https://github.com/ickyicky/window-calls) extension enabled
-- `ANTHROPIC_API_KEY` environment variable set
+- `ANTHROPIC_API_KEY` environment variable set — generate one at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)

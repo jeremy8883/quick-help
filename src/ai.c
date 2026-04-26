@@ -34,7 +34,7 @@ static char *claude_send(AiBackend *self, const char *system_prompt,
     json_builder_begin_object(b);
 
     json_builder_set_member_name(b, "model");
-    json_builder_add_string_value(b, "claude-sonnet-4-6-20250514");
+    json_builder_add_string_value(b, "claude-sonnet-4-6");
 
     json_builder_set_member_name(b, "max_tokens");
     json_builder_add_int_value(b, 1024);
