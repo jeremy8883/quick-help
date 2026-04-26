@@ -12,6 +12,8 @@ There's deliberately no history, since this app is designed for quick requests A
 
 This application has been specifically built for my own environment, Fedora with GNOME. If you'd like your own distro supported, create a GH issue.
 
+<img src="./docs/screenshot.png" width="300">
+
 *Disclaimer: this codebase is vibe-coded, but I use the application personally, and am on-top of any bugs and UI concerns.*
 
 ## Build and Install
