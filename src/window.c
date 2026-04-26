@@ -618,8 +618,9 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
-    if (((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_CONTROL_MASK)) ||
-        keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
+    if ((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down ||
+         keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) &&
+        (state & GDK_CONTROL_MASK)) {
         GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
         double val = gtk_adjustment_get_value(adj);
         double step = (keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down)
