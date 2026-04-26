@@ -759,6 +759,12 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
 
+    /* Let the model dropdown (and its popover) handle its own keys */
+    GtkWidget *focus = gtk_window_get_focus(qh->window);
+    if (focus && gtk_widget_is_ancestor(focus, GTK_WIDGET(qh->model_dropdown)))
+        return FALSE;
+
+
     /* Enter = submit, Shift+Enter = newline */
     if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
         if (state & GDK_SHIFT_MASK)
