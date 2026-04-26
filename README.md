@@ -14,7 +14,7 @@ This application has been specifically built for my own environment, Fedora with
 
 <img src="./docs/screenshot.png" width="300">
 
-*Disclaimer: this codebase is vibe-coded, but I use the application personally, and am on-top of any bugs and UI concerns.*
+*Disclaimer: this codebase is vibe-coded, but I use the application personally, and am on-top of any bugs and UI concerns* ... well, I will be, the UI is a bit rough right now, but it's functional.
 
 ## Build and Install
 
