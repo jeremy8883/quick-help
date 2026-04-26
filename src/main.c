@@ -1,7 +1,6 @@
 #include <gtk/gtk.h>
 #include <curl/curl.h>
 #include "ai.h"
-#include "config.h"
 #include "window_context.h"
 #include "system_context.h"
 #include "window.h"
@@ -12,6 +11,14 @@ static void on_alert_dismissed(GObject *source, GAsyncResult *res, gpointer user
     gtk_alert_dialog_choose_finish(alert, res, NULL);
     g_application_release(app);
 }
+
+static gboolean opt_no_decorations = FALSE;
+
+static GOptionEntry option_entries[] = {
+    { "no-decorations", 0, 0, G_OPTION_ARG_NONE, &opt_no_decorations,
+      "Hide window decorations (title bar)", NULL },
+    { NULL }
+};
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
@@ -44,14 +51,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
               sys->display_server ? sys->display_server : "(unknown)",
               sys->shell ? sys->shell : "(unknown)");
 
-    /* Load user configuration */
-    QuickHelpConfig *config = config_load();
-
     /* Create AI backend */
     AiBackend *backend = ai_claude_new(api_key);
 
     /* Create and show the window */
-    quick_help_window_new(app, backend, info, sys, config);
+    quick_help_window_new(app, backend, info, sys, opt_no_decorations);
 }
 
 int main(int argc, char *argv[]) {
@@ -59,6 +63,7 @@ int main(int argc, char *argv[]) {
 
     GtkApplication *app = gtk_application_new("com.github.quick-help",
                                                G_APPLICATION_DEFAULT_FLAGS);
+    g_application_add_main_option_entries(G_APPLICATION(app), option_entries);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
     int status = g_application_run(G_APPLICATION(app), argc, argv);

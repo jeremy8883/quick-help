@@ -9,7 +9,6 @@ json_glib = dependency('json-glib-1.0')
 
 src = files(
   'src/main.c',
-  'src/config.c',
   'src/window.c',
   'src/ai.c',
   'src/ai_web_tool.c',

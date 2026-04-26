@@ -353,7 +353,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
                                         WindowInfo *info,
                                         SystemContext *sys,
-                                        QuickHelpConfig *config) {
+                                        gboolean hide_decorations) {
     QuickHelpWindow *qh = g_new0(QuickHelpWindow, 1);
     qh->backend = backend;
     qh->info = info;
@@ -404,9 +404,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_window_set_title(qh->window, "Quick Help");
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
     gtk_window_set_resizable(qh->window, TRUE);
-    if (config->hide_decorations)
+    if (hide_decorations)
         gtk_window_set_decorated(qh->window, FALSE);
-    config_free(config);
 
     /* Escape and scroll key handler (capture phase so GtkText doesn't
        partially handle Tab/arrows before we suppress them) */
