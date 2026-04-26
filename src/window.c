@@ -759,6 +759,11 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
 
+    /* Let the model dropdown (and its popover) handle its own keys */
+    GtkWidget *focus = gtk_window_get_focus(qh->window);
+    if (focus && gtk_widget_is_ancestor(focus, GTK_WIDGET(qh->model_dropdown)))
+        return FALSE;
+
     /* Ctrl+Escape: cancel streaming */
     if (keyval == GDK_KEY_Escape && (state & GDK_CONTROL_MASK)) {
         if (qh->streaming)
