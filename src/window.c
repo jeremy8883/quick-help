@@ -11,7 +11,7 @@
 
 struct _QuickHelpWindow {
     GtkWindow *window;
-    GtkEntry *entry;
+    GtkTextView *text_view;
     GtkLabel *response_label;
     GtkScrolledWindow *scroll;
     GtkSpinner *spinner;
@@ -42,6 +42,19 @@ static void free_messages(QuickHelpWindow *qh) {
         g_free(qh->messages[i].content);
     }
     qh->msg_count = 0;
+}
+
+/* Returns a newly-allocated copy of the text view content (caller frees) */
+static char *get_input_text(QuickHelpWindow *qh) {
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(qh->text_view);
+    GtkTextIter start, end;
+    gtk_text_buffer_get_bounds(buf, &start, &end);
+    return gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+}
+
+static void set_input_text(QuickHelpWindow *qh, const char *text) {
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(qh->text_view);
+    gtk_text_buffer_set_text(buf, text, -1);
 }
 
 static void on_destroy(GtkWidget *widget, gpointer data) {
@@ -122,8 +135,7 @@ static gboolean on_stream_update(gpointer data) {
             /* Remove the user message that triggered this error */
             if (qh->msg_count > 0) {
                 qh->msg_count--;
-                gtk_editable_set_text(GTK_EDITABLE(qh->entry),
-                                      qh->messages[qh->msg_count].content);
+                set_input_text(qh, qh->messages[qh->msg_count].content);
                 g_free(qh->messages[qh->msg_count].role);
                 g_free(qh->messages[qh->msg_count].content);
             }
@@ -148,8 +160,8 @@ static gboolean on_stream_update(gpointer data) {
         }
         gtk_spinner_stop(qh->spinner);
         gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
-        gtk_widget_set_sensitive(GTK_WIDGET(qh->entry), TRUE);
-        gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+        gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), TRUE);
+        gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
     } else {
         render_conversation(qh, snapshot);
         g_free(snapshot);
@@ -223,22 +235,23 @@ static gpointer send_thread(gpointer data) {
 }
 
 static void on_submit(QuickHelpWindow *qh) {
-    const char *text = gtk_editable_get_text(GTK_EDITABLE(qh->entry));
-    if (!text || !*text) return;
+    char *text = get_input_text(qh);
+    g_strstrip(text);
+    if (!*text) { g_free(text); return; }
 
     qh->focused_link = -1;
     gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
     expand_window(qh);
 
     /* Append user message */
-    if (qh->msg_count >= MAX_MESSAGES) return;
+    if (qh->msg_count >= MAX_MESSAGES) { g_free(text); return; }
     qh->messages[qh->msg_count].role = g_strdup("user");
-    qh->messages[qh->msg_count].content = g_strdup(text);
+    qh->messages[qh->msg_count].content = text; /* transfer ownership */
     qh->msg_count++;
 
-    /* Clear entry and show spinner */
-    gtk_editable_set_text(GTK_EDITABLE(qh->entry), "");
-    gtk_widget_set_sensitive(GTK_WIDGET(qh->entry), FALSE);
+    /* Clear input and show spinner */
+    set_input_text(qh, "");
+    gtk_widget_set_sensitive(GTK_WIDGET(qh->text_view), FALSE);
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
     gtk_spinner_start(qh->spinner);
 
@@ -263,29 +276,35 @@ static void on_submit(QuickHelpWindow *qh) {
     g_thread_unref(g_thread_new("ai-stream", send_thread, qh));
 }
 
-static void on_entry_activate(GtkEntry *entry, gpointer data) {
-    (void)entry;
-    QuickHelpWindow *qh = data;
-    const char *text = gtk_editable_get_text(GTK_EDITABLE(qh->entry));
-
-    /* If entry is empty and a link is focused, open the link */
-    if ((!text || !*text) && qh->focused_link >= 0 &&
-        qh->focused_link < (int)qh->link_urls->len) {
-        const char *url = g_ptr_array_index(qh->link_urls, qh->focused_link);
-        GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
-        gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
-        g_object_unref(launcher);
-        return;
-    }
-
-    on_submit(qh);
-}
-
 static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer data) {
-    (void)ctrl; (void)keycode; (void)state;
+    (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
+
+    /* Enter = submit, Shift+Enter = newline */
+    if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+        if (state & GDK_SHIFT_MASK)
+            return FALSE; /* let GtkTextView insert newline */
+
+        char *text = get_input_text(qh);
+        g_strstrip(text);
+        gboolean empty = !*text;
+        g_free(text);
+
+        /* If input is empty and a link is focused, open it */
+        if (empty && qh->focused_link >= 0 &&
+            qh->focused_link < (int)qh->link_urls->len) {
+            const char *url = g_ptr_array_index(qh->link_urls, qh->focused_link);
+            GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
+            gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
+            g_object_unref(launcher);
+            return TRUE;
+        }
+
+        on_submit(qh);
+        return TRUE;
+    }
 
     if (keyval == GDK_KEY_Escape) {
         gtk_window_close(qh->window);
@@ -306,8 +325,8 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
         qh->expanded = FALSE;
         gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
-        gtk_editable_set_text(GTK_EDITABLE(qh->entry), "");
-        gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+        set_input_text(qh, "");
+        gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
         return TRUE;
     }
 
@@ -327,7 +346,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
-    if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down ||
+    if (((keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) && (state & GDK_CONTROL_MASK)) ||
         keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
         GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
         double val = gtk_adjustment_get_value(adj);
@@ -426,27 +445,18 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     GtkBox *input_row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6));
     gtk_box_append(qh->vbox, GTK_WIDGET(input_row));
 
-    qh->entry = GTK_ENTRY(gtk_entry_new());
-    if (info) {
-        /* Use the last segment of wm_class (e.g. "com.mitchellh.ghostty" -> "Ghostty") */
-        const char *name = info->app_name;
-        const char *last_dot = strrchr(name, '.');
-        if (last_dot && *(last_dot + 1))
-            name = last_dot + 1;
-        char *display_name = g_strdup(name);
-        if (display_name[0])
-            display_name[0] = g_ascii_toupper(display_name[0]);
+    GtkScrolledWindow *input_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    gtk_scrolled_window_set_policy(input_scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_max_content_height(input_scroll, 80);
+    gtk_scrolled_window_set_propagate_natural_height(input_scroll, TRUE);
+    gtk_widget_set_hexpand(GTK_WIDGET(input_scroll), TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(input_scroll), "frame");
 
-        char *placeholder = g_strdup_printf("Ask about %s...", display_name);
-        gtk_entry_set_placeholder_text(qh->entry, placeholder);
-        g_free(placeholder);
-        g_free(display_name);
-    } else {
-        gtk_entry_set_placeholder_text(qh->entry, "Ask anything...");
-    }
-    gtk_widget_set_hexpand(GTK_WIDGET(qh->entry), TRUE);
-    g_signal_connect(qh->entry, "activate", G_CALLBACK(on_entry_activate), qh);
-    gtk_box_append(input_row, GTK_WIDGET(qh->entry));
+    qh->text_view = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_wrap_mode(qh->text_view, GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_accepts_tab(qh->text_view, FALSE);
+    gtk_scrolled_window_set_child(input_scroll, GTK_WIDGET(qh->text_view));
+    gtk_box_append(input_row, GTK_WIDGET(input_scroll));
 
     qh->spinner = GTK_SPINNER(gtk_spinner_new());
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
@@ -476,7 +486,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     g_signal_connect(qh->window, "destroy", G_CALLBACK(on_destroy), qh);
 
     gtk_window_present(qh->window);
-    gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+    gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
 
     return qh;
 }
