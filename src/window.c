@@ -7,6 +7,7 @@
 #define INITIAL_HEIGHT 60
 #define EXPANDED_HEIGHT 500
 #define MAX_MESSAGES 50
+#define SCROLL_STEP 60.0
 
 struct _QuickHelpWindow {
     GtkWindow *window;
@@ -22,6 +23,10 @@ struct _QuickHelpWindow {
     int msg_count;
     char *system_prompt;
     gboolean expanded;
+    GString *streaming_buf;  /* accumulates assistant response during streaming */
+    gboolean streaming;      /* TRUE while a response is being streamed */
+    GMutex stream_lock;      /* protects streaming_buf */
+    gboolean stream_ui_pending; /* whether an idle update is already queued */
 };
 
 static void free_messages(QuickHelpWindow *qh) {
@@ -37,6 +42,9 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     QuickHelpWindow *qh = data;
     free_messages(qh);
     g_free(qh->system_prompt);
+    if (qh->streaming_buf)
+        g_string_free(qh->streaming_buf, TRUE);
+    g_mutex_clear(&qh->stream_lock);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
     system_context_free(qh->sys);
@@ -50,64 +58,95 @@ static void expand_window(QuickHelpWindow *qh) {
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, EXPANDED_HEIGHT);
 }
 
-typedef struct {
-    QuickHelpWindow *qh;
-    char *question;
-} SendTask;
-
-static gboolean on_response_ready(gpointer data) {
-    SendTask *task = data;
-    QuickHelpWindow *qh = task->qh;
-
-    /* Rebuild full conversation display */
-    {
-        GString *display = g_string_new(NULL);
-        for (int i = 0; i < qh->msg_count; i++) {
-            if (g_strcmp0(qh->messages[i].role, "user") == 0) {
-                char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
-                g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
-                g_free(escaped);
-            } else {
-                char *pango = markdown_to_pango(qh->messages[i].content);
-                g_string_append_printf(display, "%s\n\n", pango);
-                g_free(pango);
-            }
+/* Render the full conversation to the label */
+static void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
+    GString *display = g_string_new(NULL);
+    for (int i = 0; i < qh->msg_count; i++) {
+        if (g_strcmp0(qh->messages[i].role, "user") == 0) {
+            char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
+            g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
+            g_free(escaped);
+        } else {
+            char *pango = markdown_to_pango(qh->messages[i].content);
+            g_string_append_printf(display, "%s\n\n", pango);
+            g_free(pango);
         }
-        if (display->len > 2)
-            g_string_truncate(display, display->len - 2);
-        gtk_label_set_markup(qh->response_label, display->str);
-        g_string_free(display, TRUE);
+    }
+    if (partial_assistant) {
+        char *pango = markdown_to_pango(partial_assistant);
+        g_string_append_printf(display, "%s", pango);
+        g_free(pango);
+    }
+    if (display->len > 2 && !partial_assistant)
+        g_string_truncate(display, display->len - 2);
+    gtk_label_set_markup(qh->response_label, display->str);
+    g_string_free(display, TRUE);
+
+}
+
+/* Called on the main thread to update the UI with streaming content */
+static gboolean on_stream_update(gpointer data) {
+    QuickHelpWindow *qh = data;
+
+    g_mutex_lock(&qh->stream_lock);
+    qh->stream_ui_pending = FALSE;
+    char *snapshot = g_strdup(qh->streaming_buf->str);
+    gboolean done = !qh->streaming;
+    g_mutex_unlock(&qh->stream_lock);
+
+    if (done) {
+        /* Finalize: store message and reset */
+        if (qh->msg_count < MAX_MESSAGES) {
+            qh->messages[qh->msg_count].role = g_strdup("assistant");
+            qh->messages[qh->msg_count].content = snapshot;
+            qh->msg_count++;
+        } else {
+            g_free(snapshot);
+        }
+        render_conversation(qh, NULL);
+        gtk_spinner_stop(qh->spinner);
+        gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
+        gtk_widget_set_sensitive(GTK_WIDGET(qh->entry), TRUE);
+        gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+    } else {
+        render_conversation(qh, snapshot);
+        g_free(snapshot);
     }
 
-    gtk_spinner_stop(qh->spinner);
-    gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
-    gtk_widget_set_sensitive(GTK_WIDGET(qh->entry), TRUE);
-    gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
-
-    g_free(task->question);
-    g_free(task);
     return G_SOURCE_REMOVE;
 }
 
-static gpointer send_thread(gpointer data) {
-    SendTask *task = data;
-    QuickHelpWindow *qh = task->qh;
+/* Stream callback — called from the worker thread */
+static void on_stream_chunk(const char *delta, const char *error,
+                            void *user_data) {
+    QuickHelpWindow *qh = user_data;
 
-    char *response = qh->backend->send(
+    g_mutex_lock(&qh->stream_lock);
+    if (error) {
+        g_string_append_printf(qh->streaming_buf, "\n\n**Error:** %s", error);
+        qh->streaming = FALSE;
+    } else if (delta) {
+        g_string_append(qh->streaming_buf, delta);
+    } else {
+        /* NULL delta + NULL error = done */
+        qh->streaming = FALSE;
+    }
+    if (!qh->stream_ui_pending) {
+        qh->stream_ui_pending = TRUE;
+        g_idle_add(on_stream_update, qh);
+    }
+    g_mutex_unlock(&qh->stream_lock);
+}
+
+static gpointer send_thread(gpointer data) {
+    QuickHelpWindow *qh = data;
+
+    qh->backend->send_stream(
         qh->backend, qh->system_prompt,
-        qh->messages, qh->msg_count
+        qh->messages, qh->msg_count,
+        on_stream_chunk, qh
     );
 
-    /* Append assistant message */
-    if (qh->msg_count < MAX_MESSAGES) {
-        qh->messages[qh->msg_count].role = g_strdup("assistant");
-        qh->messages[qh->msg_count].content = response ? response : g_strdup("(No response)");
-        qh->msg_count++;
-    } else {
-        g_free(response);
-    }
-
-    g_idle_add(on_response_ready, task);
     return NULL;
 }
 
@@ -129,28 +168,21 @@ static void on_submit(QuickHelpWindow *qh) {
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
     gtk_spinner_start(qh->spinner);
 
-    /* Update label to show conversation so far */
-    GString *display = g_string_new(NULL);
-    for (int i = 0; i < qh->msg_count; i++) {
-        if (g_strcmp0(qh->messages[i].role, "user") == 0) {
-            char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
-            g_string_append_printf(display, "<b>You:</b> %s\n\n", escaped);
-            g_free(escaped);
-        } else {
-            char *pango = markdown_to_pango(qh->messages[i].content);
-            g_string_append_printf(display, "%s\n\n", pango);
-            g_free(pango);
-        }
-    }
-    g_string_append(display, "<i>Thinking...</i>");
-    gtk_label_set_markup(qh->response_label, display->str);
-    g_string_free(display, TRUE);
+    /* Show conversation with "Thinking..." */
+    render_conversation(qh, NULL);
+
+    /* Prepare streaming state */
+    g_mutex_lock(&qh->stream_lock);
+    if (qh->streaming_buf)
+        g_string_truncate(qh->streaming_buf, 0);
+    else
+        qh->streaming_buf = g_string_new(NULL);
+    qh->streaming = TRUE;
+    qh->stream_ui_pending = FALSE;
+    g_mutex_unlock(&qh->stream_lock);
 
     /* Send in background thread */
-    SendTask *task = g_new0(SendTask, 1);
-    task->qh = qh;
-    task->question = g_strdup(qh->messages[qh->msg_count - 1].content);
-    g_thread_unref(g_thread_new("ai-send", send_thread, task));
+    g_thread_unref(g_thread_new("ai-stream", send_thread, qh));
 }
 
 static void on_entry_activate(GtkEntry *entry, gpointer data) {
@@ -162,11 +194,47 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer data) {
     (void)ctrl; (void)keycode; (void)state;
+    QuickHelpWindow *qh = data;
+
     if (keyval == GDK_KEY_Escape) {
-        QuickHelpWindow *qh = data;
         gtk_window_close(qh->window);
         return TRUE;
     }
+
+    if (keyval == GDK_KEY_n && (state & GDK_CONTROL_MASK)) {
+        free_messages(qh);
+        g_mutex_lock(&qh->stream_lock);
+        if (qh->streaming_buf)
+            g_string_truncate(qh->streaming_buf, 0);
+        g_mutex_unlock(&qh->stream_lock);
+        gtk_label_set_markup(qh->response_label, "");
+        gtk_widget_set_visible(GTK_WIDGET(qh->scroll), FALSE);
+        qh->expanded = FALSE;
+        gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
+        gtk_editable_set_text(GTK_EDITABLE(qh->entry), "");
+        gtk_widget_grab_focus(GTK_WIDGET(qh->entry));
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down ||
+        keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) {
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+        double val = gtk_adjustment_get_value(adj);
+        double step = (keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down)
+            ? gtk_adjustment_get_page_size(adj)
+            : SCROLL_STEP;
+        if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Page_Up)
+            val -= step;
+        else
+            val += step;
+        double lower = gtk_adjustment_get_lower(adj);
+        double upper = gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj);
+        if (val < lower) val = lower;
+        if (val > upper) val = upper;
+        gtk_adjustment_set_value(adj, val);
+        return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -178,6 +246,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->backend = backend;
     qh->info = info;
     qh->sys = sys;
+    g_mutex_init(&qh->stream_lock);
 
     /* Build system prompt */
     GString *prompt = g_string_new(
@@ -204,9 +273,9 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     }
 
     g_string_append(prompt,
-        "Give concise, actionable answers. "
-        "Prioritize keyboard shortcuts first, then menu navigation. "
-        "Keep responses brief - the user wants quick answers, not tutorials. "
+        "If the question is about the focused application, give concise, actionable answers: "
+        "prioritize keyboard shortcuts first, then menu navigation, and keep it brief. "
+        "For general questions unrelated to the app, answer normally without artificially constraining length. "
         "Use markdown formatting: bold for emphasis, backticks for keyboard shortcuts and code.");
 
     qh->system_prompt = g_string_free(prompt, FALSE);
@@ -217,7 +286,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_window_set_default_size(qh->window, INITIAL_WIDTH, INITIAL_HEIGHT);
     gtk_window_set_resizable(qh->window, TRUE);
 
-    /* Escape key handler */
+    /* Escape and scroll key handler */
     GtkEventController *key_ctrl = gtk_event_controller_key_new();
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_key_pressed), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->window), key_ctrl);
@@ -270,6 +339,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->response_label = GTK_LABEL(gtk_label_new(NULL));
     gtk_label_set_wrap(qh->response_label, TRUE);
     gtk_label_set_xalign(qh->response_label, 0.0);
+    gtk_label_set_yalign(qh->response_label, 0.0);
     gtk_label_set_selectable(qh->response_label, TRUE);
     gtk_scrolled_window_set_child(qh->scroll, GTK_WIDGET(qh->response_label));
 

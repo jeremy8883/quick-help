@@ -9,24 +9,83 @@ typedef struct {
 } ClaudeData;
 
 typedef struct {
-    char *data;
-    size_t len;
-} Buffer;
+    AiStreamCallback cb;
+    void *user_data;
+    GString *buf;  /* partial SSE line buffer */
+} StreamCtx;
 
-static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    Buffer *buf = userdata;
+/* Try to extract text delta from a parsed SSE data line */
+static void process_sse_data(StreamCtx *ctx, const char *data) {
+    if (strcmp(data, "[DONE]") == 0)
+        return;
+
+    GError *error = NULL;
+    JsonParser *parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, data, -1, &error)) {
+        g_error_free(error);
+        g_object_unref(parser);
+        return;
+    }
+
+    JsonObject *obj = json_node_get_object(json_parser_get_root(parser));
+    const char *type = json_object_get_string_member(obj, "type");
+
+    if (type && strcmp(type, "content_block_delta") == 0) {
+        JsonObject *delta = json_object_get_object_member(obj, "delta");
+        if (delta) {
+            const char *text = json_object_get_string_member(delta, "text");
+            if (text)
+                ctx->cb(text, NULL, ctx->user_data);
+        }
+    } else if (type && strcmp(type, "error") == 0) {
+        JsonObject *err = json_object_get_object_member(obj, "error");
+        const char *msg = err ? json_object_get_string_member(err, "message") : "unknown";
+        ctx->cb(NULL, msg, ctx->user_data);
+    }
+
+    g_object_unref(parser);
+}
+
+/* Process complete lines from the SSE buffer */
+static void process_sse_buffer(StreamCtx *ctx) {
+    char *str = ctx->buf->str;
+
+    for (;;) {
+        char *nl = strchr(str, '\n');
+        if (!nl) break;
+
+        *nl = '\0';
+        /* Remove trailing \r */
+        if (nl > str && *(nl - 1) == '\r')
+            *(nl - 1) = '\0';
+
+        if (strncmp(str, "data: ", 6) == 0) {
+            process_sse_data(ctx, str + 6);
+        }
+        /* Skip event:, id:, and empty lines */
+
+        str = nl + 1;
+    }
+
+    /* Keep any remaining partial line in the buffer */
+    if (str != ctx->buf->str) {
+        gsize remaining = ctx->buf->len - (str - ctx->buf->str);
+        memmove(ctx->buf->str, str, remaining);
+        g_string_truncate(ctx->buf, remaining);
+    }
+}
+
+static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    StreamCtx *ctx = userdata;
     size_t total = size * nmemb;
-    char *tmp = realloc(buf->data, buf->len + total + 1);
-    if (!tmp) return 0;
-    buf->data = tmp;
-    memcpy(buf->data + buf->len, ptr, total);
-    buf->len += total;
-    buf->data[buf->len] = '\0';
+    g_string_append_len(ctx->buf, ptr, total);
+    process_sse_buffer(ctx);
     return total;
 }
 
-static char *claude_send(AiBackend *self, const char *system_prompt,
-                         AiMessage *messages, int count) {
+static void claude_send_stream(AiBackend *self, const char *system_prompt,
+                               AiMessage *messages, int count,
+                               AiStreamCallback cb, void *user_data) {
     ClaudeData *cd = self->data;
 
     /* Build JSON request body */
@@ -38,6 +97,9 @@ static char *claude_send(AiBackend *self, const char *system_prompt,
 
     json_builder_set_member_name(b, "max_tokens");
     json_builder_add_int_value(b, 1024);
+
+    json_builder_set_member_name(b, "stream");
+    json_builder_add_boolean_value(b, TRUE);
 
     json_builder_set_member_name(b, "system");
     json_builder_add_string_value(b, system_prompt);
@@ -69,10 +131,16 @@ static char *claude_send(AiBackend *self, const char *system_prompt,
     CURL *curl = curl_easy_init();
     if (!curl) {
         g_free(body);
-        return NULL;
+        cb(NULL, "Failed to initialize HTTP client", user_data);
+        return;
     }
 
-    Buffer response = {0};
+    StreamCtx ctx = {
+        .cb = cb,
+        .user_data = user_data,
+        .buf = g_string_new(NULL),
+    };
+
     struct curl_slist *headers = NULL;
     char auth_header[512];
     snprintf(auth_header, sizeof(auth_header), "x-api-key: %s", cd->api_key);
@@ -83,61 +151,21 @@ static char *claude_send(AiBackend *self, const char *system_prompt,
     curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
     CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK)
+        cb(NULL, curl_easy_strerror(res), user_data);
+
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     g_free(body);
+    g_string_free(ctx.buf, TRUE);
 
-    if (res != CURLE_OK) {
-        free(response.data);
-        return g_strdup_printf("Error: %s", curl_easy_strerror(res));
-    }
-
-    /* Parse response JSON */
-    GError *error = NULL;
-    JsonParser *parser = json_parser_new();
-    if (!json_parser_load_from_data(parser, response.data, response.len, &error)) {
-        char *err = g_strdup_printf("Failed to parse response: %s", error->message);
-        g_error_free(error);
-        g_object_unref(parser);
-        free(response.data);
-        return err;
-    }
-
-    JsonObject *obj = json_node_get_object(json_parser_get_root(parser));
-
-    /* Check for API error */
-    if (json_object_has_member(obj, "error")) {
-        JsonObject *err_obj = json_object_get_object_member(obj, "error");
-        const char *msg = json_object_get_string_member(err_obj, "message");
-        char *err = g_strdup_printf("API Error: %s", msg ? msg : "unknown");
-        g_object_unref(parser);
-        free(response.data);
-        return err;
-    }
-
-    /* Extract text from content[0].text */
-    char *result_text = NULL;
-    if (json_object_has_member(obj, "content")) {
-        JsonArray *content = json_object_get_array_member(obj, "content");
-        if (json_array_get_length(content) > 0) {
-            JsonObject *block = json_array_get_object_element(content, 0);
-            const char *text = json_object_get_string_member(block, "text");
-            if (text)
-                result_text = g_strdup(text);
-        }
-    }
-
-    if (!result_text)
-        result_text = g_strdup("(No response text)");
-
-    g_object_unref(parser);
-    free(response.data);
-    return result_text;
+    /* Signal completion */
+    cb(NULL, NULL, user_data);
 }
 
 static void claude_destroy(AiBackend *self) {
@@ -151,7 +179,7 @@ AiBackend *ai_claude_new(const char *api_key) {
     ClaudeData *cd = g_new0(ClaudeData, 1);
     cd->api_key = g_strdup(api_key);
     backend->data = cd;
-    backend->send = claude_send;
+    backend->send_stream = claude_send_stream;
     backend->destroy = claude_destroy;
     return backend;
 }
