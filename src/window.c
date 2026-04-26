@@ -14,7 +14,7 @@ static const char *model_ids[] = {
     "claude-sonnet-4-6",
     "claude-opus-4-6",
 };
-static const char *model_names[] = { "Haiku 4.5", "Sonnet 4.6", "Opus 4.6" };
+static const char *model_names[] = { "Haiku 4.5", "Sonnet 4.6", "Opus 4.6", NULL };
 #define NUM_MODELS 3
 #define DEFAULT_MODEL_IDX 1 /* Sonnet */
 #define IMAGE_THUMB_SIZE 48
@@ -176,8 +176,14 @@ static void update_scroll_button(QuickHelpWindow *qh) {
                            val > 0 && !at_bottom);
 }
 
-static void on_scroll_changed(GtkAdjustment *adj, gpointer data) {
+static void on_scroll_value_changed(GtkAdjustment *adj, gpointer data) {
     (void)adj;
+    update_scroll_button(data);
+}
+
+static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
+                                    gpointer data) {
+    (void)obj; (void)pspec;
     update_scroll_button(data);
 }
 
@@ -1013,8 +1019,10 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
 
     /* Track scroll position to show/hide chevron */
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(qh->scroll);
-    g_signal_connect(vadj, "value-changed", G_CALLBACK(on_scroll_changed), qh);
-    g_signal_connect(vadj, "notify::upper", G_CALLBACK(on_scroll_changed), qh);
+    g_signal_connect(vadj, "value-changed",
+                     G_CALLBACK(on_scroll_value_changed), qh);
+    g_signal_connect(vadj, "notify::upper",
+                     G_CALLBACK(on_scroll_upper_changed), qh);
 
     qh->chat_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8));
     gtk_widget_set_margin_top(GTK_WIDGET(qh->chat_box), 4);
