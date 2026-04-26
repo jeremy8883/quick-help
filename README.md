@@ -54,12 +54,13 @@ Restart your machine for the variable to be picked up by your session (I'm sure 
 
 | Shortcut | Action |
 | --- | --- |
-| `Enter` | Send the question (or cancel during streaming) |
+| `Enter` | Send the question |
 | `Shift+Enter` | Insert a newline |
+| `Ctrl+Esc` | Cancel streaming |
 | `Esc` | Close the window |
 | `Ctrl+N` | Start a new conversation |
 | `Ctrl+V` | Paste image from clipboard (text paste works normally when no image) |
-| `Tab` / `Shift+Tab` | Cycle through links and code blocks in the response |
+| `Tab` / `Shift+Tab` | Cycle through chat bubbles |
 | `Alt+↑` / `Alt+↓` | Cycle through models |
 | `Ctrl+↑` / `Ctrl+↓` | Scroll the response |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | Scroll the response by page |

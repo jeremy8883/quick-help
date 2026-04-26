@@ -52,10 +52,9 @@ struct _QuickHelpWindow {
     GMutex stream_lock;      /* protects streaming_buf */
     gboolean stream_ui_pending; /* whether an idle update is already queued */
     gsize tool_status_start;    /* buf position before status text (G_MAXSIZE = none) */
-    int focused_link;        /* currently focused link index (-1 = none) */
-    int link_count;          /* total links in last render */
-    GPtrArray *tab_items;    /* content for tabbable items (URLs or code text) */
-    GArray *tab_types;       /* TabItemType for each item */
+    int focused_bubble;      /* currently focused assistant bubble (-1 = none) */
+    int bubble_count;        /* number of assistant bubbles in last render */
+    GPtrArray *bubble_links; /* GPtrArray of GPtrArray* of link URLs per bubble */
     GtkDropDown *model_dropdown;
     GtkButton *stop_button;  /* shown during streaming */
     GtkLabel *error_label;   /* red error message below entry */
@@ -66,7 +65,12 @@ struct _QuickHelpWindow {
     GtkBox *image_preview_box;  /* horizontal box for thumbnails */
     GtkButton *scroll_to_bottom; /* floating chevron button */
     GtkWidget *drop_overlay;     /* "Drop images here" overlay */
+    gboolean scroll_pin_bottom;  /* request scroll-to-bottom on next upper change */
+    double scroll_pin_value;     /* restore this value on next upper change (-1=none) */
+    gboolean submit_after_cancel; /* submit queued text after stream cancel completes */
 };
+
+static void on_submit(QuickHelpWindow *qh);
 
 static void free_messages(QuickHelpWindow *qh) {
     for (int i = 0; i < qh->msg_count; i++) {
@@ -103,8 +107,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
         g_string_free(qh->streaming_buf, TRUE);
     g_free(qh->stream_error_msg);
     g_mutex_clear(&qh->stream_lock);
-    g_ptr_array_unref(qh->tab_items);
-    g_array_unref(qh->tab_types);
+    g_ptr_array_unref(qh->bubble_links);
     g_ptr_array_unref(qh->pending_images);
     ai_backend_free(qh->backend);
     window_info_free(qh->info);
@@ -185,7 +188,18 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer data) {
 static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
                                     gpointer data) {
     (void)obj; (void)pspec;
-    update_scroll_button(data);
+    QuickHelpWindow *qh = data;
+    if (qh->scroll_pin_bottom) {
+        qh->scroll_pin_bottom = FALSE;
+        qh->scroll_pin_value = -1;
+        scroll_to_bottom(qh);
+    } else if (qh->scroll_pin_value >= 0) {
+        double val = qh->scroll_pin_value;
+        qh->scroll_pin_value = -1;
+        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+        gtk_adjustment_set_value(adj, val);
+    }
+    update_scroll_button(qh);
 }
 
 static void on_scroll_to_bottom_clicked(GtkButton *btn, gpointer data) {
@@ -194,12 +208,24 @@ static void on_scroll_to_bottom_clicked(GtkButton *btn, gpointer data) {
 }
 
 /* Helper: create a selectable, wrapping label from Pango markup */
+/* Handle link clicks: open in browser, suppress GTK's built-in link focus */
+static gboolean on_label_activate_link(GtkLabel *lbl, const char *uri,
+                                       gpointer data) {
+    (void)lbl; (void)data;
+    GtkUriLauncher *launcher = gtk_uri_launcher_new(uri);
+    gtk_uri_launcher_launch(launcher, NULL, NULL, NULL, NULL);
+    g_object_unref(launcher);
+    return TRUE; /* suppress default handling */
+}
+
 static GtkWidget *make_markup_label(const char *markup) {
     GtkLabel *lbl = GTK_LABEL(gtk_label_new(NULL));
     gtk_label_set_markup(lbl, markup);
     gtk_label_set_wrap(lbl, TRUE);
     gtk_label_set_xalign(lbl, 0.0);
     gtk_label_set_selectable(lbl, TRUE);
+    g_signal_connect(lbl, "activate-link",
+                     G_CALLBACK(on_label_activate_link), NULL);
     return GTK_WIDGET(lbl);
 }
 
@@ -213,8 +239,12 @@ static GtkWidget *make_bubble(GtkWidget *content, gboolean is_user) {
     gtk_widget_set_margin_bottom(GTK_WIDGET(bubble), 2);
     gtk_box_append(bubble, content);
 
-    /* Outer box for alignment */
+    /* Outer box for alignment — small margin on the aligned side */
     GtkBox *row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
+    if (is_user)
+        gtk_widget_set_margin_start(GTK_WIDGET(row), 20);
+    else
+        gtk_widget_set_margin_end(GTK_WIDGET(row), 20);
     if (is_user) {
         /* Right-aligned: spacer then bubble */
         GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -238,20 +268,17 @@ static void render_conversation(QuickHelpWindow *qh, const char *partial_assista
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box))))
         gtk_box_remove(qh->chat_box, child);
 
-    /* Set up tabbable-item tracking */
-    g_ptr_array_set_size(qh->tab_items, 0);
-    g_array_set_size(qh->tab_types, 0);
-    MarkdownLinkInfo li = {
-        .highlight_index = qh->focused_link,
-        .current_link = 0,
-        .urls = qh->tab_items,
-        .types = qh->tab_types
-    };
+    /* Reset per-bubble link tracking */
+    g_ptr_array_set_size(qh->bubble_links, 0);
+    int bubble_idx = 0;
 
     for (int i = 0; i < qh->msg_count; i++) {
-        if (g_strcmp0(qh->messages[i].role, "user") == 0) {
+        gboolean is_user = g_strcmp0(qh->messages[i].role, "user") == 0;
+        GtkWidget *bubble;
+        GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
+
+        if (is_user) {
             GtkBox *msg_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
-            /* Show images if present */
             if (qh->messages[i].image_count > 0)
                 gtk_box_append(msg_box,
                     make_image_row(qh->messages[i].images,
@@ -259,22 +286,61 @@ static void render_conversation(QuickHelpWindow *qh, const char *partial_assista
             char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
             gtk_box_append(msg_box, make_markup_label(escaped));
             g_free(escaped);
-            gtk_box_append(qh->chat_box, make_bubble(GTK_WIDGET(msg_box), TRUE));
+            bubble = make_bubble(GTK_WIDGET(msg_box), TRUE);
         } else {
+            /* Collect links (not code blocks) for this bubble */
+            GPtrArray *all_items = g_ptr_array_new_with_free_func(g_free);
+            GArray *all_types = g_array_new(FALSE, FALSE, sizeof(TabItemType));
+            MarkdownLinkInfo li = {
+                .highlight_index = -1,
+                .current_link = 0,
+                .urls = all_items,
+                .types = all_types
+            };
             char *pango = markdown_to_pango_ex(qh->messages[i].content, &li);
-            gtk_box_append(qh->chat_box,
-                make_bubble(make_markup_label(pango), FALSE));
+            for (guint j = 0; j < all_items->len; j++) {
+                if (g_array_index(all_types, TabItemType, j) == TAB_LINK)
+                    g_ptr_array_add(links, g_strdup(g_ptr_array_index(all_items, j)));
+            }
+            g_ptr_array_unref(all_items);
+            g_array_unref(all_types);
+            bubble = make_bubble(make_markup_label(pango), FALSE);
             g_free(pango);
         }
+
+        if (bubble_idx == qh->focused_bubble)
+            gtk_widget_add_css_class(bubble, "focused-bubble");
+        gtk_box_append(qh->chat_box, bubble);
+        g_ptr_array_add(qh->bubble_links, links);
+        bubble_idx++;
     }
     if (partial_assistant) {
+        GPtrArray *all_items = g_ptr_array_new_with_free_func(g_free);
+        GArray *all_types = g_array_new(FALSE, FALSE, sizeof(TabItemType));
+        MarkdownLinkInfo li = {
+            .highlight_index = -1,
+            .current_link = 0,
+            .urls = all_items,
+            .types = all_types
+        };
         char *pango = markdown_to_pango_ex(partial_assistant, &li);
-        gtk_box_append(qh->chat_box,
-            make_bubble(make_markup_label(pango), FALSE));
+        GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
+        for (guint j = 0; j < all_items->len; j++) {
+            if (g_array_index(all_types, TabItemType, j) == TAB_LINK)
+                g_ptr_array_add(links, g_strdup(g_ptr_array_index(all_items, j)));
+        }
+        g_ptr_array_unref(all_items);
+        g_array_unref(all_types);
+        GtkWidget *bubble = make_bubble(make_markup_label(pango), FALSE);
+        if (bubble_idx == qh->focused_bubble)
+            gtk_widget_add_css_class(bubble, "focused-bubble");
+        gtk_box_append(qh->chat_box, bubble);
         g_free(pango);
+        g_ptr_array_add(qh->bubble_links, links);
+        bubble_idx++;
     }
 
-    qh->link_count = li.current_link;
+    qh->bubble_count = bubble_idx;
 }
 
 /* Called on the main thread to update the UI with streaming content */
@@ -292,16 +358,12 @@ static gboolean on_stream_update(gpointer data) {
 
     if (done) {
         if (cancelled) {
-            /* Save partial content with interrupted marker */
-            if (qh->msg_count < MAX_MESSAGES) {
-                GString *content = g_string_new(snapshot);
-                if (content->len > 0)
-                    g_string_append(content, "\n\n");
-                g_string_append(content, "[request interrupted by user]");
+            /* Save partial content (if any) */
+            if (*snapshot && qh->msg_count < MAX_MESSAGES) {
                 qh->messages[qh->msg_count].role = g_strdup("assistant");
-                qh->messages[qh->msg_count].content =
-                    g_string_free(content, FALSE);
+                qh->messages[qh->msg_count].content = snapshot;
                 qh->msg_count++;
+                snapshot = NULL;
             }
             g_free(snapshot);
             render_conversation(qh, NULL);
@@ -344,27 +406,27 @@ static gboolean on_stream_update(gpointer data) {
         gtk_spinner_stop(qh->spinner);
         gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
         gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
-        if (!had_error)
-            set_input_text(qh, "");
-        gtk_text_view_set_editable(qh->text_view, TRUE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
+
+        /* If a submit was queued during cancel, fire it now */
+        if (qh->submit_after_cancel) {
+            qh->submit_after_cancel = FALSE;
+            on_submit(qh);
+        }
     } else {
         GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
         double prev_val = gtk_adjustment_get_value(adj);
         gboolean was_at_bottom = is_scrolled_to_bottom(qh);
         gboolean was_at_top = prev_val <= 0.0;
+        /* Schedule scroll restoration for after layout recalculates upper */
+        if (was_at_top)
+            qh->scroll_pin_value = 0;
+        else if (was_at_bottom)
+            qh->scroll_pin_bottom = TRUE;
+        else
+            qh->scroll_pin_value = prev_val;
         render_conversation(qh, snapshot);
         g_free(snapshot);
-        /* Pin scroll position during streaming:
-         * - at top (y=0): stay at top
-         * - at bottom: stay at bottom
-         * - in between: restore previous position */
-        if (was_at_top)
-            gtk_adjustment_set_value(adj, 0);
-        else if (was_at_bottom)
-            scroll_to_bottom(qh);
-        else
-            gtk_adjustment_set_value(adj, prev_val);
     }
 
     return G_SOURCE_REMOVE;
@@ -588,7 +650,7 @@ static void on_submit(QuickHelpWindow *qh) {
         text = g_strdup("What's in this image?");
     }
 
-    qh->focused_link = -1;
+    qh->focused_bubble = -1;
     gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
     expand_window(qh);
 
@@ -614,16 +676,14 @@ static void on_submit(QuickHelpWindow *qh) {
     }
     qh->msg_count++;
 
-    /* Clear input, show placeholder, and disable */
+    /* Clear input */
     set_input_text(qh, "");
-    GtkTextBuffer *tbuf = gtk_text_view_get_buffer(qh->text_view);
-    gtk_text_buffer_set_text(tbuf, "Press enter to cancel", -1);
-    gtk_text_view_set_editable(qh->text_view, FALSE);
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
     gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), TRUE);
     gtk_spinner_start(qh->spinner);
 
     /* Show conversation with "Thinking..." */
+    qh->scroll_pin_bottom = TRUE;
     render_conversation(qh, NULL);
 
     /* Prepare streaming state */
@@ -653,6 +713,44 @@ static void on_model_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
         g_free(qh->backend->model);
         qh->backend->model = g_strdup(model_ids[idx]);
     }
+    gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
+}
+
+/* Callback when a link is clicked in the link picker popover */
+static void on_link_picker_clicked(GtkButton *btn, gpointer data) {
+    GtkPopover *popover = GTK_POPOVER(data);
+    const char *url = g_object_get_data(G_OBJECT(btn), "url");
+    GtkWidget *win = gtk_widget_get_ancestor(GTK_WIDGET(popover), GTK_TYPE_WINDOW);
+    GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
+    gtk_uri_launcher_launch(launcher, GTK_WINDOW(win), NULL, NULL, NULL);
+    g_object_unref(launcher);
+    gtk_popover_popdown(popover);
+}
+
+/* Show a popover with links from the focused bubble */
+static void show_link_picker(QuickHelpWindow *qh, GPtrArray *links) {
+    /* Find the focused bubble widget in chat_box */
+    GtkWidget *target = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
+    for (int i = 0; i < qh->focused_bubble && target; i++)
+        target = gtk_widget_get_next_sibling(target);
+    if (!target) return;
+
+    GtkWidget *popover = gtk_popover_new();
+    gtk_widget_set_parent(popover, target);
+
+    GtkBox *box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2));
+    for (guint i = 0; i < links->len; i++) {
+        const char *url = g_ptr_array_index(links, i);
+        GtkWidget *btn = gtk_button_new_with_label(url);
+        gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
+        gtk_widget_set_halign(btn, GTK_ALIGN_START);
+        g_object_set_data_full(G_OBJECT(btn), "url", g_strdup(url), g_free);
+        g_signal_connect(btn, "clicked",
+                         G_CALLBACK(on_link_picker_clicked), popover);
+        gtk_box_append(box, btn);
+    }
+    gtk_popover_set_child(GTK_POPOVER(popover), GTK_WIDGET(box));
+    gtk_popover_popup(GTK_POPOVER(popover));
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
@@ -661,14 +759,27 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
     (void)ctrl; (void)keycode;
     QuickHelpWindow *qh = data;
 
-    /* Enter = submit (or cancel if streaming), Shift+Enter = newline */
+    /* Ctrl+Escape: cancel streaming */
+    if (keyval == GDK_KEY_Escape && (state & GDK_CONTROL_MASK)) {
+        if (qh->streaming)
+            cancel_stream(qh);
+        return TRUE;
+    }
+
+    /* Enter = submit, Shift+Enter = newline */
     if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
         if (state & GDK_SHIFT_MASK)
             return FALSE; /* let GtkTextView insert newline */
 
-        /* If streaming, Enter cancels */
         if (qh->streaming) {
-            cancel_stream(qh);
+            /* Cancel current stream; submit will fire when it finishes */
+            char *text = get_input_text(qh);
+            g_strstrip(text);
+            if (*text || qh->pending_images->len > 0) {
+                qh->submit_after_cancel = TRUE;
+                cancel_stream(qh);
+            }
+            g_free(text);
             return TRUE;
         }
 
@@ -677,21 +788,18 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         gboolean empty = !*text;
         g_free(text);
 
-        /* If input is empty and an item is focused, activate it */
-        if (empty && qh->focused_link >= 0 &&
-            qh->focused_link < (int)qh->tab_items->len) {
-            TabItemType type = g_array_index(qh->tab_types, TabItemType,
-                                             qh->focused_link);
-            const char *content = g_ptr_array_index(qh->tab_items,
-                                                    qh->focused_link);
-            if (type == TAB_LINK) {
-                GtkUriLauncher *launcher = gtk_uri_launcher_new(content);
+        /* If input is empty and a bubble is focused, open its links */
+        if (empty && qh->focused_bubble >= 0 &&
+            qh->focused_bubble < (int)qh->bubble_links->len) {
+            GPtrArray *links = g_ptr_array_index(qh->bubble_links,
+                                                  qh->focused_bubble);
+            if (links->len == 1) {
+                const char *url = g_ptr_array_index(links, 0);
+                GtkUriLauncher *launcher = gtk_uri_launcher_new(url);
                 gtk_uri_launcher_launch(launcher, qh->window, NULL, NULL, NULL);
                 g_object_unref(launcher);
-            } else {
-                GdkClipboard *clip = gdk_display_get_clipboard(
-                    gdk_display_get_default());
-                gdk_clipboard_set_text(clip, content);
+            } else if (links->len > 1) {
+                show_link_picker(qh, links);
             }
             return TRUE;
         }
@@ -731,10 +839,9 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
                 gtk_box_remove(qh->chat_box, c);
         }
         gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
-        g_ptr_array_set_size(qh->tab_items, 0);
-        g_array_set_size(qh->tab_types, 0);
-        qh->focused_link = -1;
-        qh->link_count = 0;
+        g_ptr_array_set_size(qh->bubble_links, 0);
+        qh->focused_bubble = -1;
+        qh->bubble_count = 0;
         gtk_widget_set_visible(
             gtk_widget_get_parent(GTK_WIDGET(qh->scroll)), FALSE);
         qh->expanded = FALSE;
@@ -746,17 +853,17 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval,
         return TRUE;
     }
 
-    /* Tab / Shift+Tab: cycle through links */
+    /* Tab / Shift+Tab: cycle through assistant bubbles */
     if ((keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) &&
-        qh->link_count > 0 && !qh->streaming) {
+        qh->bubble_count > 0 && !qh->streaming) {
         if (keyval == GDK_KEY_ISO_Left_Tab || (state & GDK_SHIFT_MASK)) {
-            qh->focused_link--;
-            if (qh->focused_link < -1)
-                qh->focused_link = qh->link_count - 1;
+            qh->focused_bubble--;
+            if (qh->focused_bubble < -1)
+                qh->focused_bubble = qh->bubble_count - 1;
         } else {
-            qh->focused_link++;
-            if (qh->focused_link >= qh->link_count)
-                qh->focused_link = -1;
+            qh->focused_bubble++;
+            if (qh->focused_bubble >= qh->bubble_count)
+                qh->focused_bubble = -1;
         }
         render_conversation(qh, NULL);
         return TRUE;
@@ -860,9 +967,10 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->sys = sys;
     g_mutex_init(&qh->stream_lock);
     qh->tool_status_start = G_MAXSIZE;
-    qh->focused_link = -1;
-    qh->tab_items = g_ptr_array_new_with_free_func(g_free);
-    qh->tab_types = g_array_new(FALSE, FALSE, sizeof(TabItemType));
+    qh->focused_bubble = -1;
+    qh->scroll_pin_value = -1;
+    qh->bubble_links = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)g_ptr_array_unref);
     qh->pending_images = g_ptr_array_new_with_free_func(pending_image_free);
 
     /* Wire up tool status notifications */
@@ -905,7 +1013,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css,
         ".card { padding: 8px 12px; border-radius: 12px; "
-        "background: alpha(currentColor, 0.08); }");
+        "background: alpha(currentColor, 0.08); }"
+        ".focused-bubble .card { outline: 2px solid @accent_color; }");
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -966,7 +1075,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
     gtk_box_append(input_row, GTK_WIDGET(qh->spinner));
 
-    qh->stop_button = GTK_BUTTON(gtk_button_new_with_label("Stop"));
+    qh->stop_button = GTK_BUTTON(gtk_button_new_from_icon_name("media-playback-stop-symbolic"));
     gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
     g_signal_connect(qh->stop_button, "clicked",
                      G_CALLBACK(on_stop_clicked), qh);
