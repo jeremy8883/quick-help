@@ -1,22 +1,15 @@
 #include "ai.h"
+#include "ai_web_tool.h"
 #include <curl/curl.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
 #include <stdlib.h>
 
-#define MAX_TOOL_ROUNDS   5
-#define MAX_FETCH_BYTES   200000
-#define MAX_CONTENT_CHARS 12000
+#define MAX_TOOL_ROUNDS 5
 
 typedef struct {
     char *api_key;
 } ClaudeData;
-
-typedef struct {
-    char    *id;
-    char    *name;
-    GString *input_json;
-} ToolCall;
 
 typedef struct {
     AiStreamCallback cb;
@@ -28,142 +21,6 @@ typedef struct {
     int              tool_cap;
     char            *stop_reason;
 } StreamState;
-
-/* ------------------------------------------------------------------ */
-/*  HTML stripping                                                     */
-/* ------------------------------------------------------------------ */
-
-static char *strip_html(const char *html, size_t len) {
-    GString *out = g_string_sized_new(len / 3);
-    const char *p = html, *end = html + len;
-    gboolean in_script = FALSE, in_style = FALSE;
-    int blank_lines = 0;
-
-    while (p < end) {
-        if (*p == '<') {
-            const char *gt = memchr(p, '>', end - p);
-            if (!gt) break;
-            const char *tag = p + 1;
-            gboolean closing = (*tag == '/');
-            const char *name = closing ? tag + 1 : tag;
-            while (name < gt && *name == ' ') name++;
-
-            if (g_ascii_strncasecmp(name, "script", 6) == 0)
-                in_script = !closing;
-            else if (g_ascii_strncasecmp(name, "style", 5) == 0)
-                in_style = !closing;
-
-            if (!in_script && !in_style &&
-                (g_ascii_strncasecmp(name, "br", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "p",  1) == 0 ||
-                 g_ascii_strncasecmp(name, "div",3) == 0 ||
-                 g_ascii_strncasecmp(name, "li", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "tr", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h1", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h2", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h3", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h4", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h5", 2) == 0 ||
-                 g_ascii_strncasecmp(name, "h6", 2) == 0)) {
-                if (blank_lines < 2) {
-                    g_string_append_c(out, '\n');
-                    blank_lines++;
-                }
-            }
-            p = gt + 1;
-        } else if (in_script || in_style) {
-            p++;
-        } else if (*p == '&') {
-            if (g_str_has_prefix(p, "&amp;"))       { g_string_append_c(out, '&');  p += 5; }
-            else if (g_str_has_prefix(p, "&lt;"))    { g_string_append_c(out, '<');  p += 4; }
-            else if (g_str_has_prefix(p, "&gt;"))    { g_string_append_c(out, '>');  p += 4; }
-            else if (g_str_has_prefix(p, "&quot;"))  { g_string_append_c(out, '"');  p += 6; }
-            else if (g_str_has_prefix(p, "&nbsp;"))  { g_string_append_c(out, ' ');  p += 6; }
-            else if (g_str_has_prefix(p, "&#")) {
-                const char *semi = memchr(p, ';', MIN((size_t)(end - p), 10));
-                p = semi ? semi + 1 : p + 1;
-            } else { g_string_append_c(out, '&'); p++; }
-            blank_lines = 0;
-        } else if (*p == '\n' || *p == '\r') {
-            if (blank_lines < 2) { g_string_append_c(out, '\n'); blank_lines++; }
-            p++;
-        } else if (*p == ' ' || *p == '\t') {
-            if (out->len > 0 && out->str[out->len-1] != ' ' && out->str[out->len-1] != '\n')
-                g_string_append_c(out, ' ');
-            p++;
-        } else {
-            g_string_append_c(out, *p);
-            blank_lines = 0;
-            p++;
-        }
-        if (out->len > MAX_CONTENT_CHARS) {
-            g_string_append(out, "\n[content truncated]");
-            break;
-        }
-    }
-    return g_string_free(out, FALSE);
-}
-
-/* ------------------------------------------------------------------ */
-/*  URL fetching                                                       */
-/* ------------------------------------------------------------------ */
-
-typedef struct { GString *data; size_t max; } FetchBuf;
-
-static size_t fetch_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
-    FetchBuf *fb = ud;
-    size_t total = size * nmemb;
-    size_t take = (fb->data->len + total > fb->max)
-                  ? fb->max - fb->data->len : total;
-    if (take > 0) g_string_append_len(fb->data, ptr, take);
-    return total;
-}
-
-static char *fetch_url(const char *url) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return g_strdup("Error: failed to init HTTP client");
-
-    FetchBuf fb = { .data = g_string_new(NULL), .max = MAX_FETCH_BYTES };
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fetch_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &fb);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "QuickHelp/1.0");
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-
-    CURLcode res = curl_easy_perform(curl);
-    char *result;
-
-    if (res != CURLE_OK) {
-        result = g_strdup_printf("Error: %s", curl_easy_strerror(res));
-    } else {
-        long code;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-        if (code >= 400) {
-            result = g_strdup_printf("HTTP error %ld", code);
-        } else {
-            char *ct = NULL;
-            curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct);
-            if (ct && (strstr(ct, "text/html") || strstr(ct, "xhtml"))) {
-                result = strip_html(fb.data->str, fb.data->len);
-            } else {
-                if (fb.data->len > MAX_CONTENT_CHARS) {
-                    g_string_truncate(fb.data, MAX_CONTENT_CHARS);
-                    g_string_append(fb.data, "\n[content truncated]");
-                }
-                result = g_string_free(fb.data, FALSE);
-                fb.data = NULL;
-            }
-        }
-    }
-
-    if (fb.data) g_string_free(fb.data, TRUE);
-    curl_easy_cleanup(curl);
-    return result;
-}
 
 /* ------------------------------------------------------------------ */
 /*  SSE processing                                                     */
@@ -257,7 +114,7 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  JSON helpers for tool-use message building                         */
+/*  JSON helpers for message building                                  */
 /* ------------------------------------------------------------------ */
 
 static JsonNode *make_simple_msg(const char *role, const char *content) {
@@ -300,7 +157,6 @@ static JsonNode *make_assistant_tool_msg(const char *text,
         json_builder_set_member_name(b, "name");
         json_builder_add_string_value(b, calls[i].name);
         json_builder_set_member_name(b, "input");
-        /* Parse accumulated JSON string into a node */
         JsonParser *p = json_parser_new();
         if (json_parser_load_from_data(p, calls[i].input_json->str, -1, NULL))
             json_builder_add_value(b, json_node_copy(json_parser_get_root(p)));
@@ -345,15 +201,6 @@ static JsonNode *make_tool_result_msg(ToolCall *calls, int n, char **results) {
     return node;
 }
 
-static void free_tool_calls(ToolCall *calls, int n) {
-    for (int i = 0; i < n; i++) {
-        g_free(calls[i].id);
-        g_free(calls[i].name);
-        if (calls[i].input_json) g_string_free(calls[i].input_json, TRUE);
-    }
-    g_free(calls);
-}
-
 /* ------------------------------------------------------------------ */
 /*  Claude send (with tool-use loop)                                   */
 /* ------------------------------------------------------------------ */
@@ -363,7 +210,6 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
                                AiStreamCallback cb, void *user_data) {
     ClaudeData *cd = self->data;
 
-    /* Collect all message nodes (originals + tool-loop extras) */
     GPtrArray *msgs = g_ptr_array_new_with_free_func(
         (GDestroyNotify)json_node_unref);
     for (int i = 0; i < count; i++)
@@ -385,42 +231,11 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         json_builder_set_member_name(b, "system");
         json_builder_add_string_value(b, system_prompt);
 
-        /* Tool definitions */
         json_builder_set_member_name(b, "tools");
         json_builder_begin_array(b);
-        {
-            json_builder_begin_object(b);
-            json_builder_set_member_name(b, "name");
-            json_builder_add_string_value(b, "fetch_url");
-            json_builder_set_member_name(b, "description");
-            json_builder_add_string_value(b,
-                "Fetch the contents of a web page. Use this to retrieve current "
-                "information from URLs you know about (documentation, references, "
-                "release notes, etc). You can call this multiple times to follow links.");
-            json_builder_set_member_name(b, "input_schema");
-            json_builder_begin_object(b);
-            json_builder_set_member_name(b, "type");
-            json_builder_add_string_value(b, "object");
-            json_builder_set_member_name(b, "properties");
-            json_builder_begin_object(b);
-            json_builder_set_member_name(b, "url");
-            json_builder_begin_object(b);
-            json_builder_set_member_name(b, "type");
-            json_builder_add_string_value(b, "string");
-            json_builder_set_member_name(b, "description");
-            json_builder_add_string_value(b, "The URL to fetch");
-            json_builder_end_object(b);
-            json_builder_end_object(b);
-            json_builder_set_member_name(b, "required");
-            json_builder_begin_array(b);
-            json_builder_add_string_value(b, "url");
-            json_builder_end_array(b);
-            json_builder_end_object(b);
-            json_builder_end_object(b);
-        }
+        web_tool_add_definitions(b);
         json_builder_end_array(b);
 
-        /* Messages */
         json_builder_set_member_name(b, "messages");
         json_builder_begin_array(b);
         for (guint i = 0; i < msgs->len; i++)
@@ -483,34 +298,13 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
             && st.num_tools > 0;
 
         if (need_tools) {
-            /* Record the assistant's response (text + tool_use blocks) */
             g_ptr_array_add(msgs, make_assistant_tool_msg(
                 st.full_text->str, st.tool_calls, st.num_tools));
 
-            /* Execute each tool */
             char **results = g_new0(char *, st.num_tools);
-            for (int i = 0; i < st.num_tools; i++) {
-                if (strcmp(st.tool_calls[i].name, "fetch_url") == 0) {
-                    JsonParser *p = json_parser_new();
-                    if (json_parser_load_from_data(
-                            p, st.tool_calls[i].input_json->str, -1, NULL)) {
-                        JsonObject *inp = json_node_get_object(
-                            json_parser_get_root(p));
-                        const char *url =
-                            json_object_get_string_member(inp, "url");
-                        results[i] = url ? fetch_url(url)
-                                         : g_strdup("Error: no URL provided");
-                    } else {
-                        results[i] = g_strdup("Error: invalid tool input");
-                    }
-                    g_object_unref(p);
-                } else {
-                    results[i] = g_strdup_printf(
-                        "Error: unknown tool '%s'", st.tool_calls[i].name);
-                }
-            }
+            for (int i = 0; i < st.num_tools; i++)
+                results[i] = web_tool_execute(&st.tool_calls[i]);
 
-            /* Send tool results back */
             g_ptr_array_add(msgs, make_tool_result_msg(
                 st.tool_calls, st.num_tools, results));
 
@@ -518,15 +312,15 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
             g_free(results);
         }
 
-        free_tool_calls(st.tool_calls, st.num_tools);
+        tool_calls_free(st.tool_calls, st.num_tools);
         g_string_free(st.full_text, TRUE);
         g_free(st.stop_reason);
 
-        if (!need_tools) break;   /* done — no more tool calls */
+        if (!need_tools) break;
     }
 
     g_ptr_array_unref(msgs);
-    cb(NULL, NULL, user_data);  /* signal completion */
+    cb(NULL, NULL, user_data);
 }
 
 static void claude_destroy(AiBackend *self) {

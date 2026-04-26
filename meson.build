@@ -11,6 +11,8 @@ src = files(
   'src/main.c',
   'src/window.c',
   'src/ai.c',
+  'src/ai_web_tool.c',
+  'src/utils/html.c',
   'src/window_context.c',
   'src/system_context.c',
   'src/markdown.c',
