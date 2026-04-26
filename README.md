@@ -59,7 +59,6 @@ Restart your machine for the variable to be picked up by your session (I'm sure 
 | `Esc` | Close the window |
 | `Ctrl+N` | Start a new conversation |
 | `Ctrl+V` | Paste image from clipboard (text paste works normally when no image) |
-| `Tab` / `Shift+Tab` | Cycle focus: input → model dropdown → chat bubbles → input |
 | `Ctrl+L` | Jump back to the input text box |
 | `Ctrl+↑` / `Ctrl+↓` | Scroll the response |
 | `Ctrl+PgUp` / `Ctrl+PgDn` | Scroll the response by page |
