@@ -17,7 +17,7 @@ static const char *model_ids[] = {
 static const char *model_names[] = { "Haiku 4.5", "Sonnet 4.6", "Opus 4.6", NULL };
 #define NUM_MODELS 3
 #define DEFAULT_MODEL_IDX 1 /* Sonnet */
-#define IMAGE_THUMB_SIZE 48
+#define IMAGE_THUMB_SIZE 70
 
 typedef struct {
     GdkTexture *texture;
@@ -135,6 +135,7 @@ static GdkTexture *texture_from_base64(const char *base64) {
 static GtkWidget *make_image_row(AiImage *images, int count) {
     GtkScrolledWindow *sw = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
     gtk_scrolled_window_set_policy(sw, GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    gtk_scrolled_window_set_max_content_height(sw, IMAGE_THUMB_SIZE);
     gtk_scrolled_window_set_propagate_natural_width(sw, TRUE);
 
     GtkBox *row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4));
@@ -468,6 +469,7 @@ static void rebuild_image_preview(QuickHelpWindow *qh) {
             GDK_PAINTABLE(img->texture));
         gtk_widget_set_size_request(picture, IMAGE_THUMB_SIZE, IMAGE_THUMB_SIZE);
         gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
+        gtk_widget_set_overflow(picture, GTK_OVERFLOW_HIDDEN);
         gtk_box_append(qh->image_preview_box, picture);
     }
 
