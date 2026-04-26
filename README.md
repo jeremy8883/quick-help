@@ -42,6 +42,11 @@ Restart your machine for the variable to be picked up by your session (I'm sure 
 
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
 
+## CLI Flags
+
+* `--no-decorations` - hides window decorations (title bar)
+* `--model` - Default model ID. Possible values `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`, `claude-opus-4-6`
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |
