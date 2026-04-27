@@ -121,8 +121,26 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
 /*  JSON helpers for message building                                  */
 /* ------------------------------------------------------------------ */
 
+/* Strip UI tool markers (\x01TOOL:...\x01) from message content */
+static char *strip_tool_markers(const char *text) {
+    if (!text || !strchr(text, '\x01')) return g_strdup(text);
+    GString *out = g_string_new(NULL);
+    const char *p = text;
+    while (*p) {
+        if (*p == '\x01' && strncmp(p, "\x01TOOL:", 6) == 0) {
+            const char *end = strchr(p + 6, '\x01');
+            if (end) { p = end + 1; continue; }
+        }
+        if (*p != '\x01')
+            g_string_append_c(out, *p);
+        p++;
+    }
+    return g_string_free(out, FALSE);
+}
+
 static JsonNode *make_msg(const char *role, const char *content,
                           AiImage *images, int image_count) {
+    char *clean = strip_tool_markers(content);
     JsonBuilder *b = json_builder_new();
     json_builder_begin_object(b);
     json_builder_set_member_name(b, "role");
@@ -151,14 +169,15 @@ static JsonNode *make_msg(const char *role, const char *content,
         json_builder_set_member_name(b, "type");
         json_builder_add_string_value(b, "text");
         json_builder_set_member_name(b, "text");
-        json_builder_add_string_value(b, content);
+        json_builder_add_string_value(b, clean);
         json_builder_end_object(b);
         json_builder_end_array(b);
     } else {
-        json_builder_add_string_value(b, content);
+        json_builder_add_string_value(b, clean);
     }
 
     json_builder_end_object(b);
+    g_free(clean);
     JsonNode *n = json_builder_get_root(b);
     g_object_unref(b);
     return n;

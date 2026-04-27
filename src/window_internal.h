@@ -36,7 +36,7 @@ struct _QuickHelpWindow {
     gboolean streaming;      /* TRUE while a response is being streamed */
     GMutex stream_lock;      /* protects streaming_buf */
     gboolean stream_ui_pending; /* whether an idle update is already queued */
-    gsize tool_status_start;    /* buf position before status text (G_MAXSIZE = none) */
+    /* (tool status is stored inline in streaming_buf as \x01TOOL:...\x01 markers) */
     int focused_bubble;      /* currently focused assistant bubble (-1 = none) */
     int bubble_count;        /* number of assistant bubbles in last render */
     GPtrArray *bubble_links; /* GPtrArray of GPtrArray* of link URLs per bubble */

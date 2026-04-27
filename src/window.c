@@ -235,6 +235,64 @@ static char *render_markdown_with_links(const char *content, GPtrArray *links) {
     return pango;
 }
 
+/* Render assistant content that may contain \x01TOOL:...\x01 markers.
+ * Text segments become bubbles; markers become persistent grey status lines.
+ * Returns the number of bubbles added. */
+static int render_assistant_content(QuickHelpWindow *qh, const char *content,
+                                    int start_bubble_idx) {
+    int bubbles = 0;
+    const char *p = content;
+    while (*p) {
+        /* Try to match a tool marker */
+        if (*p == '\x01') {
+            if (strncmp(p, "\x01TOOL:", 6) == 0) {
+                const char *end = strchr(p + 6, '\x01');
+                if (end) {
+                    char *status = g_strndup(p + 6, end - p - 6);
+                    char *esc = g_markup_escape_text(status, -1);
+                    char *markup = g_strdup_printf("<i>%s\u2026</i>", esc);
+                    GtkWidget *lbl = gtk_label_new(NULL);
+                    gtk_label_set_markup(GTK_LABEL(lbl), markup);
+                    gtk_label_set_wrap(GTK_LABEL(lbl), TRUE);
+                    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
+                    gtk_widget_set_opacity(lbl, 0.5);
+                    gtk_widget_set_margin_start(lbl, 16);
+                    gtk_widget_set_margin_top(lbl, 2);
+                    gtk_widget_set_margin_bottom(lbl, 2);
+                    gtk_box_append(qh->chat_box, lbl);
+                    g_free(markup);
+                    g_free(esc);
+                    g_free(status);
+                    p = end + 1;
+                    continue;
+                }
+            }
+            /* Stray \x01, skip */
+            p++;
+            continue;
+        }
+        /* Regular text until next \x01 or end */
+        const char *next = strchr(p, '\x01');
+        size_t len = next ? (size_t)(next - p) : strlen(p);
+        char *segment = g_strndup(p, len);
+        g_strstrip(segment);
+        if (*segment) {
+            GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
+            char *pango = render_markdown_with_links(segment, links);
+            GtkWidget *bubble = make_bubble(make_markup_label(pango), FALSE);
+            if (start_bubble_idx + bubbles == qh->focused_bubble)
+                gtk_widget_add_css_class(bubble, "focused-bubble");
+            gtk_box_append(qh->chat_box, bubble);
+            g_free(pango);
+            g_ptr_array_add(qh->bubble_links, links);
+            bubbles++;
+        }
+        g_free(segment);
+        p += len;
+    }
+    return bubbles;
+}
+
 void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
     /* Clear chat_box */
     GtkWidget *child;
@@ -246,10 +304,9 @@ void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
 
     for (int i = 0; i < qh->msg_count; i++) {
         gboolean is_user = g_strcmp0(qh->messages[i].role, "user") == 0;
-        GtkWidget *bubble;
-        GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
 
         if (is_user) {
+            GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
             GtkBox *msg_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
             if (qh->messages[i].image_count > 0)
                 gtk_box_append(msg_box,
@@ -258,30 +315,20 @@ void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
             char *escaped = g_markup_escape_text(qh->messages[i].content, -1);
             gtk_box_append(msg_box, make_markup_label(escaped));
             g_free(escaped);
-            bubble = make_bubble(GTK_WIDGET(msg_box), TRUE);
+            GtkWidget *bubble = make_bubble(GTK_WIDGET(msg_box), TRUE);
+            if (bubble_idx == qh->focused_bubble)
+                gtk_widget_add_css_class(bubble, "focused-bubble");
+            gtk_box_append(qh->chat_box, bubble);
+            g_ptr_array_add(qh->bubble_links, links);
+            bubble_idx++;
         } else {
-            char *pango = render_markdown_with_links(
-                qh->messages[i].content, links);
-            bubble = make_bubble(make_markup_label(pango), FALSE);
-            g_free(pango);
+            bubble_idx += render_assistant_content(
+                qh, qh->messages[i].content, bubble_idx);
         }
-
-        if (bubble_idx == qh->focused_bubble)
-            gtk_widget_add_css_class(bubble, "focused-bubble");
-        gtk_box_append(qh->chat_box, bubble);
-        g_ptr_array_add(qh->bubble_links, links);
-        bubble_idx++;
     }
     if (partial_assistant) {
-        GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
-        char *pango = render_markdown_with_links(partial_assistant, links);
-        GtkWidget *bubble = make_bubble(make_markup_label(pango), FALSE);
-        if (bubble_idx == qh->focused_bubble)
-            gtk_widget_add_css_class(bubble, "focused-bubble");
-        gtk_box_append(qh->chat_box, bubble);
-        g_free(pango);
-        g_ptr_array_add(qh->bubble_links, links);
-        bubble_idx++;
+        bubble_idx += render_assistant_content(
+            qh, partial_assistant, bubble_idx);
     }
 
     qh->bubble_count = bubble_idx;
@@ -382,10 +429,6 @@ static void on_stream_chunk(const char *delta, const char *error,
         g_mutex_unlock(&qh->stream_lock);
         return;
     }
-    if (qh->tool_status_start != G_MAXSIZE) {
-        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
-        qh->tool_status_start = G_MAXSIZE;
-    }
     if (error) {
         g_string_append_printf(qh->streaming_buf, "\n\n**Error:** %s", error);
         qh->stream_had_error = TRUE;
@@ -411,12 +454,9 @@ static void on_tool_status(const char *tool_name, const char *detail,
                        ? "Searching" : "Fetching";
 
     g_mutex_lock(&qh->stream_lock);
-    if (qh->tool_status_start != G_MAXSIZE)
-        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
-    qh->tool_status_start = qh->streaming_buf->len;
-    char *status = g_strdup_printf("\n\n*%s %s\u2026*", verb, detail);
-    g_string_append(qh->streaming_buf, status);
-    g_free(status);
+    char *marker = g_strdup_printf("\x01TOOL:%s %s\x01", verb, detail);
+    g_string_append(qh->streaming_buf, marker);
+    g_free(marker);
     if (!qh->stream_ui_pending) {
         qh->stream_ui_pending = TRUE;
         g_idle_add(on_stream_update, qh);
@@ -439,10 +479,6 @@ void cancel_stream(QuickHelpWindow *qh) {
     if (!qh->streaming) {
         g_mutex_unlock(&qh->stream_lock);
         return;
-    }
-    if (qh->tool_status_start != G_MAXSIZE) {
-        g_string_truncate(qh->streaming_buf, qh->tool_status_start);
-        qh->tool_status_start = G_MAXSIZE;
     }
     qh->streaming = FALSE;
     qh->stream_cancelled = TRUE;
@@ -633,7 +669,6 @@ void on_submit(QuickHelpWindow *qh) {
     g_free(qh->stream_error_msg);
     qh->stream_error_msg = NULL;
     qh->stream_ui_pending = FALSE;
-    qh->tool_status_start = G_MAXSIZE;
     g_mutex_unlock(&qh->stream_lock);
 
     g_thread_unref(g_thread_new("ai-stream", send_thread, qh));
@@ -839,7 +874,6 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->info = info;
     qh->sys = sys;
     g_mutex_init(&qh->stream_lock);
-    qh->tool_status_start = G_MAXSIZE;
     qh->focused_bubble = -1;
     qh->scroll_pin_value = -1;
     qh->bubble_links = g_ptr_array_new_with_free_func(
