@@ -23,7 +23,8 @@ struct _QuickHelpWindow {
     GtkTextView *text_view;
     GtkBox *chat_box;           /* vertical box inside scroll for messages */
     GtkScrolledWindow *scroll;
-    GtkSpinner *spinner;
+    GtkProgressBar *progress_bar;
+    guint pulse_timer_id;
     GtkBox *vbox;
     AiBackend *backend;
     WindowInfo *info;

@@ -48,6 +48,8 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     (void)widget;
     QuickHelpWindow *qh = data;
     free_messages(qh);
+    if (qh->pulse_timer_id)
+        g_source_remove(qh->pulse_timer_id);
     g_free(qh->system_prompt);
     if (qh->streaming_buf)
         g_string_free(qh->streaming_buf, TRUE);
@@ -129,11 +131,8 @@ void scroll_to_bottom(QuickHelpWindow *qh) {
 }
 
 static void update_scroll_button(QuickHelpWindow *qh) {
-    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
-    double val = gtk_adjustment_get_value(adj);
-    gboolean at_bottom = is_scrolled_to_bottom(qh);
     gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom),
-                           val > 0 && !at_bottom);
+                           !is_scrolled_to_bottom(qh));
 }
 
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer data) {
@@ -249,8 +248,20 @@ static int render_assistant_content(QuickHelpWindow *qh, const char *content,
                 const char *end = strchr(p + 6, '\x01');
                 if (end) {
                     char *status = g_strndup(p + 6, end - p - 6);
-                    char *esc = g_markup_escape_text(status, -1);
-                    char *markup = g_strdup_printf("<i>%s\u2026</i>", esc);
+                    char *markup;
+                    const char *fetch_prefix = "Fetch from ";
+                    if (strncmp(status, fetch_prefix, strlen(fetch_prefix)) == 0) {
+                        const char *url = status + strlen(fetch_prefix);
+                        char *esc_url = g_markup_escape_text(url, -1);
+                        markup = g_strdup_printf(
+                            "<i>Fetch from <a href=\"%s\">%s</a></i>",
+                            esc_url, esc_url);
+                        g_free(esc_url);
+                    } else {
+                        char *esc = g_markup_escape_text(status, -1);
+                        markup = g_strdup_printf("<i>%s</i>", esc);
+                        g_free(esc);
+                    }
                     GtkWidget *lbl = gtk_label_new(NULL);
                     gtk_label_set_markup(GTK_LABEL(lbl), markup);
                     gtk_label_set_wrap(GTK_LABEL(lbl), TRUE);
@@ -259,9 +270,10 @@ static int render_assistant_content(QuickHelpWindow *qh, const char *content,
                     gtk_widget_set_margin_start(lbl, 16);
                     gtk_widget_set_margin_top(lbl, 2);
                     gtk_widget_set_margin_bottom(lbl, 2);
+                    g_signal_connect(lbl, "activate-link",
+                                     G_CALLBACK(on_label_activate_link), NULL);
                     gtk_box_append(qh->chat_box, lbl);
                     g_free(markup);
-                    g_free(esc);
                     g_free(status);
                     p = end + 1;
                     continue;
@@ -393,8 +405,11 @@ static gboolean on_stream_update(gpointer data) {
             }
             render_conversation(qh, NULL);
         }
-        gtk_spinner_stop(qh->spinner);
-        gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
+        if (qh->pulse_timer_id) {
+            g_source_remove(qh->pulse_timer_id);
+            qh->pulse_timer_id = 0;
+        }
+        gtk_widget_set_visible(GTK_WIDGET(qh->progress_bar), FALSE);
         gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
         gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
 
@@ -451,7 +466,7 @@ static void on_tool_status(const char *tool_name, const char *detail,
                            void *user_data) {
     QuickHelpWindow *qh = user_data;
     const char *verb = (tool_name && strcmp(tool_name, "web_search") == 0)
-                       ? "Searching" : "Fetching";
+                       ? "Web search" : "Fetch from";
 
     g_mutex_lock(&qh->stream_lock);
     char *marker = g_strdup_printf("\x01TOOL:%s %s\x01", verb, detail);
@@ -616,6 +631,11 @@ static gboolean on_drop(GtkDropTarget *target, const GValue *value,
 /*  Submit and conversation control                                    */
 /* ------------------------------------------------------------------ */
 
+static gboolean pulse_progress(gpointer data) {
+    gtk_progress_bar_pulse(GTK_PROGRESS_BAR(data));
+    return G_SOURCE_CONTINUE;
+}
+
 void on_submit(QuickHelpWindow *qh) {
     char *text = get_input_text(qh);
     g_strstrip(text);
@@ -651,9 +671,11 @@ void on_submit(QuickHelpWindow *qh) {
     qh->msg_count++;
 
     set_input_text(qh, "");
-    gtk_widget_set_visible(GTK_WIDGET(qh->spinner), TRUE);
+    gtk_widget_set_visible(GTK_WIDGET(qh->progress_bar), TRUE);
     gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), TRUE);
-    gtk_spinner_start(qh->spinner);
+    if (qh->pulse_timer_id == 0) {
+        qh->pulse_timer_id = g_timeout_add(80, pulse_progress, qh->progress_bar);
+    }
 
     qh->scroll_pin_bottom = TRUE;
     render_conversation(qh, NULL);
@@ -785,11 +807,6 @@ static GtkWidget *build_input_row(QuickHelpWindow *qh,
                      G_CALLBACK(on_textview_focus_enter), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->text_view), focus_ctrl);
 
-    /* Spinner */
-    qh->spinner = GTK_SPINNER(gtk_spinner_new());
-    gtk_widget_set_visible(GTK_WIDGET(qh->spinner), FALSE);
-    gtk_box_append(input_row, GTK_WIDGET(qh->spinner));
-
     /* Stop button */
     qh->stop_button = GTK_BUTTON(gtk_button_new_from_icon_name("media-playback-stop-symbolic"));
     gtk_widget_set_visible(GTK_WIDGET(qh->stop_button), FALSE);
@@ -919,7 +936,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_css_provider_load_from_string(css,
         ".card { padding: 8px 12px; border-radius: 12px; "
         "background: alpha(currentColor, 0.08); }"
-        ".focused-bubble .card { outline: 2px solid @accent_color; }");
+        ".focused-bubble .card { outline: 2px solid @accent_color; }"
+        "progressbar trough, progressbar progress { min-height: 3px; }");
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -949,6 +967,14 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_widget_set_margin_top(GTK_WIDGET(qh->vbox), 8);
     gtk_widget_set_margin_bottom(GTK_WIDGET(qh->vbox), 8);
     gtk_overlay_set_child(window_overlay, GTK_WIDGET(qh->vbox));
+
+    /* Progress bar (thin, bottom-pinned) */
+    qh->progress_bar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+    gtk_progress_bar_set_pulse_step(qh->progress_bar, 0.03);
+    gtk_widget_set_halign(GTK_WIDGET(qh->progress_bar), GTK_ALIGN_FILL);
+    gtk_widget_set_valign(GTK_WIDGET(qh->progress_bar), GTK_ALIGN_END);
+    gtk_widget_set_visible(GTK_WIDGET(qh->progress_bar), FALSE);
+    gtk_overlay_add_overlay(window_overlay, GTK_WIDGET(qh->progress_bar));
 
     /* Drop overlay */
     qh->drop_overlay = gtk_label_new("Drop images here");
