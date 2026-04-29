@@ -120,6 +120,14 @@ static gboolean is_scrolled_to_bottom(QuickHelpWindow *qh) {
     double val = gtk_adjustment_get_value(adj);
     double upper = gtk_adjustment_get_upper(adj);
     double page = gtk_adjustment_get_page_size(adj);
+    return val >= upper - page - 1.0;
+}
+
+static gboolean is_scrolled_near_bottom(QuickHelpWindow *qh) {
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
+    double val = gtk_adjustment_get_value(adj);
+    double upper = gtk_adjustment_get_upper(adj);
+    double page = gtk_adjustment_get_page_size(adj);
     return val >= upper - page - 10.0;
 }
 
@@ -133,13 +141,13 @@ void scroll_to_bottom(QuickHelpWindow *qh) {
 static gboolean show_scroll_button(gpointer data) {
     QuickHelpWindow *qh = data;
     qh->scroll_btn_timer = 0;
-    if (!is_scrolled_to_bottom(qh))
+    if (!is_scrolled_near_bottom(qh))
         gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom), TRUE);
     return G_SOURCE_REMOVE;
 }
 
 static void update_scroll_button(QuickHelpWindow *qh) {
-    if (is_scrolled_to_bottom(qh)) {
+    if (is_scrolled_near_bottom(qh)) {
         /* Hide immediately and cancel any pending show */
         if (qh->scroll_btn_timer) {
             g_source_remove(qh->scroll_btn_timer);
@@ -170,9 +178,12 @@ static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
                                     gpointer data) {
     (void)obj; (void)pspec;
     QuickHelpWindow *qh = data;
-    if (qh->scroll_pin_bottom || qh->was_at_bottom) {
+    if (qh->scroll_pin_bottom) {
+        /* Explicit pin (streaming, submit) — scroll immediately to avoid flicker */
         qh->scroll_pin_bottom = FALSE;
-        /* Defer so layout is fully settled before scrolling */
+        scroll_to_bottom(qh);
+    } else if (qh->was_at_bottom) {
+        /* Layout-driven change (input resize, window resize) — defer until settled */
         g_idle_add(scroll_pin_idle, qh);
     }
     update_scroll_button(qh);
