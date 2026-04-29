@@ -942,7 +942,8 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         WindowInfo *info,
                                         SystemContext *sys,
                                         gboolean hide_decorations,
-                                        const char *default_model) {
+                                        const char *default_model,
+                                        const char *screenshot_path) {
     QuickHelpWindow *qh = g_new0(QuickHelpWindow, 1);
     qh->backend = backend;
     qh->info = info;
@@ -1068,6 +1069,14 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_box_append(qh->vbox, build_chat_area(qh));
 
     g_signal_connect(qh->window, "destroy", G_CALLBACK(on_destroy), qh);
+
+    /* Load screenshot as pending image if provided */
+    if (screenshot_path) {
+        GFile *file = g_file_new_for_path(screenshot_path);
+        add_image_from_file(qh, file);
+        g_object_unref(file);
+    }
+
     gtk_window_present(qh->window);
     gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
 

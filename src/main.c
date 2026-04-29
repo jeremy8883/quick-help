@@ -13,11 +13,14 @@ static void on_alert_dismissed(GObject *source, GAsyncResult *res, gpointer user
 }
 
 static gboolean opt_no_decorations = FALSE;
+static gboolean opt_screenshot = FALSE;
 static char *opt_model = NULL;
 
 static GOptionEntry option_entries[] = {
     { "no-decorations", 0, 0, G_OPTION_ARG_NONE, &opt_no_decorations,
       "Hide window decorations (title bar)", NULL },
+    { "screenshot", 's', 0, G_OPTION_ARG_NONE, &opt_screenshot,
+      "Capture and attach a screenshot of the focused window", NULL },
     { "model", 'm', 0, G_OPTION_ARG_STRING, &opt_model,
       "Default model ID (e.g. claude-sonnet-4-6)", "MODEL" },
     { NULL }
@@ -46,6 +49,29 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         g_message("Could not detect focused window (window-calls extension may not be running)");
     }
 
+    /* Capture screenshot of focused window before our window appears */
+    char *screenshot_path = NULL;
+    if (opt_screenshot) {
+        char *fname = g_strdup_printf("qh-screenshot-%d.png", getpid());
+        screenshot_path = g_build_filename(g_get_tmp_dir(), fname, NULL);
+        g_free(fname);
+        gchar *argv[] = { "gnome-screenshot", "-w", "-f", screenshot_path, NULL };
+        GError *ss_error = NULL;
+        gint exit_status;
+        if (!g_spawn_sync(NULL, argv, NULL,
+                          G_SPAWN_SEARCH_PATH,
+                          NULL, NULL, NULL, NULL,
+                          &exit_status, &ss_error) ||
+            !g_spawn_check_wait_status(exit_status, &ss_error)) {
+            g_warning("gnome-screenshot failed: %s", ss_error->message);
+            g_error_free(ss_error);
+            g_free(screenshot_path);
+            screenshot_path = NULL;
+        } else {
+            g_message("Screenshot saved: %s", screenshot_path);
+        }
+    }
+
     /* Gather system context */
     SystemContext *sys = detect_system_context();
     g_message("System: %s, DE: %s, Display: %s, Shell: %s",
@@ -63,7 +89,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         backend->brave_api_key = g_strdup(brave_key);
 
     /* Create and show the window */
-    quick_help_window_new(app, backend, info, sys, opt_no_decorations, opt_model);
+    quick_help_window_new(app, backend, info, sys, opt_no_decorations, opt_model,
+                          screenshot_path);
+    g_free(screenshot_path);
 }
 
 int main(int argc, char *argv[]) {

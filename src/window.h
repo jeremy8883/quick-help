@@ -15,6 +15,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         WindowInfo *info,
                                         SystemContext *sys,
                                         gboolean hide_decorations,
-                                        const char *default_model);
+                                        const char *default_model,
+                                        const char *screenshot_path);
 
 #endif

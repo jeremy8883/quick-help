@@ -20,6 +20,15 @@ This application has been specifically built for my own environment, Fedora with
 
 * Install the [window-calls](https://github.com/ickyicky/window-calls) GNOME extension, which is used to detect the currently focused window.
 
+* **(Optional, for screenshots)** Install `gnome-screenshot`
+
+```bash
+# Fedora
+sudo dnf install gnome-screenshot
+```
+
+Then install the [allow-gnome-screenshot](https://github.com/siddhpant/allow-gnome-screenshot) GNOME extension, since screenshotting is blocked under wayland.
+
 * Install 3rd party deps GTK4, libcurl, json-glib, and meson.
 
 ```bash
@@ -61,7 +70,8 @@ Without this key the app still works, but it won't offer web search to the AI (U
 ## CLI Flags
 
 * `--no-decorations` - hides window decorations (title bar)
-* `--model` - Default model ID. Possible values `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`, `claude-opus-4-6`
+* `--screenshot` / `-s` - capture and attach a screenshot of the focused window (requires `gnome-screenshot` and the `allow-gnome-screenshot` extension)
+* `--model` / `-m` - Default model ID. Possible values `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`, `claude-opus-4-6`
 
 ## Keyboard shortcuts
 
