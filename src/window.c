@@ -140,6 +140,13 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer data) {
     update_scroll_button(data);
 }
 
+static gboolean scroll_pin_idle(gpointer data) {
+    QuickHelpWindow *qh = data;
+    scroll_to_bottom(qh);
+    update_scroll_button(qh);
+    return G_SOURCE_REMOVE;
+}
+
 static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
                                     gpointer data) {
     (void)obj; (void)pspec;
@@ -147,7 +154,8 @@ static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
     if (qh->scroll_pin_bottom) {
         qh->scroll_pin_bottom = FALSE;
         qh->scroll_pin_value = -1;
-        scroll_to_bottom(qh);
+        /* Defer so layout is fully settled before scrolling */
+        g_idle_add(scroll_pin_idle, qh);
     } else if (qh->scroll_pin_value >= 0) {
         double val = qh->scroll_pin_value;
         qh->scroll_pin_value = -1;
@@ -783,15 +791,47 @@ void show_link_picker(QuickHelpWindow *qh, GPtrArray *links) {
 /*  UI construction helpers                                            */
 /* ------------------------------------------------------------------ */
 
+/* Resize the input scroll area to fit content, up to ~15 lines */
+#define INPUT_MAX_HEIGHT 300
+
+static gboolean input_resize_idle(gpointer data) {
+    QuickHelpWindow *qh = data;
+    GtkScrolledWindow *sw = qh->input_scroll;
+    GtkWidget *child = gtk_scrolled_window_get_child(sw);
+    if (!child) return G_SOURCE_REMOVE;
+
+    gboolean was_at_bottom = qh->expanded && is_scrolled_to_bottom(qh);
+
+    /* Get preferred height of text view (reflects actual content) */
+    int nat_h;
+    gtk_widget_measure(child, GTK_ORIENTATION_VERTICAL, -1,
+                       NULL, &nat_h, NULL, NULL);
+
+    /* Add padding to account for the frame border/padding around the scroll */
+    int h = MIN(nat_h + 6, INPUT_MAX_HEIGHT);
+    gtk_widget_set_size_request(GTK_WIDGET(sw), -1, h);
+
+    /* If chat was scrolled to bottom, keep it pinned there after resize */
+    if (was_at_bottom)
+        qh->scroll_pin_bottom = TRUE;
+
+    return G_SOURCE_REMOVE;
+}
+
+static void on_input_buffer_changed(GtkTextBuffer *buf G_GNUC_UNUSED,
+                                    gpointer data) {
+    /* Defer resize so the text view has laid out the new content first */
+    g_idle_add(input_resize_idle, data);
+}
+
 static GtkWidget *build_input_row(QuickHelpWindow *qh,
                                   const char *default_model) {
     GtkBox *input_row = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6));
 
     /* Scrolled text input */
-    GtkScrolledWindow *input_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    qh->input_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    GtkScrolledWindow *input_scroll = qh->input_scroll;
     gtk_scrolled_window_set_policy(input_scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_scrolled_window_set_max_content_height(input_scroll, 50);
-    gtk_scrolled_window_set_propagate_natural_height(input_scroll, TRUE);
     gtk_widget_set_hexpand(GTK_WIDGET(input_scroll), TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(input_scroll), "frame");
 
@@ -800,6 +840,11 @@ static GtkWidget *build_input_row(QuickHelpWindow *qh,
     gtk_text_view_set_accepts_tab(qh->text_view, FALSE);
     gtk_scrolled_window_set_child(input_scroll, GTK_WIDGET(qh->text_view));
     gtk_box_append(input_row, GTK_WIDGET(input_scroll));
+
+    /* Grow input area as user types, up to INPUT_MAX_HEIGHT */
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(qh->text_view);
+    g_signal_connect(buf, "changed",
+                     G_CALLBACK(on_input_buffer_changed), qh);
 
     /* Clear bubble focus when textview gains focus */
     GtkEventController *focus_ctrl = gtk_event_controller_focus_new();
@@ -866,6 +911,8 @@ static GtkWidget *build_chat_area(QuickHelpWindow *qh) {
     g_signal_connect(vadj, "value-changed",
                      G_CALLBACK(on_scroll_value_changed), qh);
     g_signal_connect(vadj, "notify::upper",
+                     G_CALLBACK(on_scroll_upper_changed), qh);
+    g_signal_connect(vadj, "notify::page-size",
                      G_CALLBACK(on_scroll_upper_changed), qh);
 
     qh->chat_box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8));

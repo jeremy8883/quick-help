@@ -41,6 +41,7 @@ struct _QuickHelpWindow {
     int focused_bubble;      /* currently focused assistant bubble (-1 = none) */
     int bubble_count;        /* number of assistant bubbles in last render */
     GPtrArray *bubble_links; /* GPtrArray of GPtrArray* of link URLs per bubble */
+    GtkScrolledWindow *input_scroll;
     GtkDropDown *model_dropdown;
     GtkButton *stop_button;  /* shown during streaming */
     GtkLabel *error_label;   /* red error message below entry */
