@@ -120,7 +120,7 @@ static gboolean is_scrolled_to_bottom(QuickHelpWindow *qh) {
     double val = gtk_adjustment_get_value(adj);
     double upper = gtk_adjustment_get_upper(adj);
     double page = gtk_adjustment_get_page_size(adj);
-    return val >= upper - page - 1.0;
+    return val >= upper - page - 10.0;
 }
 
 void scroll_to_bottom(QuickHelpWindow *qh) {
@@ -130,14 +130,33 @@ void scroll_to_bottom(QuickHelpWindow *qh) {
     gtk_adjustment_set_value(adj, upper - page);
 }
 
+static gboolean show_scroll_button(gpointer data) {
+    QuickHelpWindow *qh = data;
+    qh->scroll_btn_timer = 0;
+    if (!is_scrolled_to_bottom(qh))
+        gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom), TRUE);
+    return G_SOURCE_REMOVE;
+}
+
 static void update_scroll_button(QuickHelpWindow *qh) {
-    gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom),
-                           !is_scrolled_to_bottom(qh));
+    if (is_scrolled_to_bottom(qh)) {
+        /* Hide immediately and cancel any pending show */
+        if (qh->scroll_btn_timer) {
+            g_source_remove(qh->scroll_btn_timer);
+            qh->scroll_btn_timer = 0;
+        }
+        gtk_widget_set_visible(GTK_WIDGET(qh->scroll_to_bottom), FALSE);
+    } else if (!qh->scroll_btn_timer) {
+        /* Delay showing to avoid flashing during layout transitions */
+        qh->scroll_btn_timer = g_timeout_add(150, show_scroll_button, qh);
+    }
 }
 
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer data) {
     (void)adj;
-    update_scroll_button(data);
+    QuickHelpWindow *qh = data;
+    qh->was_at_bottom = is_scrolled_to_bottom(qh);
+    update_scroll_button(qh);
 }
 
 static gboolean scroll_pin_idle(gpointer data) {
@@ -151,16 +170,10 @@ static void on_scroll_upper_changed(GObject *obj, GParamSpec *pspec,
                                     gpointer data) {
     (void)obj; (void)pspec;
     QuickHelpWindow *qh = data;
-    if (qh->scroll_pin_bottom) {
+    if (qh->scroll_pin_bottom || qh->was_at_bottom) {
         qh->scroll_pin_bottom = FALSE;
-        qh->scroll_pin_value = -1;
         /* Defer so layout is fully settled before scrolling */
         g_idle_add(scroll_pin_idle, qh);
-    } else if (qh->scroll_pin_value >= 0) {
-        double val = qh->scroll_pin_value;
-        qh->scroll_pin_value = -1;
-        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
-        gtk_adjustment_set_value(adj, val);
     }
     update_scroll_button(qh);
 }
@@ -426,16 +439,8 @@ static gboolean on_stream_update(gpointer data) {
             on_submit(qh);
         }
     } else {
-        GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment(qh->scroll);
-        double prev_val = gtk_adjustment_get_value(adj);
-        gboolean was_at_bottom = is_scrolled_to_bottom(qh);
-        gboolean was_at_top = prev_val <= 0.0;
-        if (was_at_top)
-            qh->scroll_pin_value = 0;
-        else if (was_at_bottom)
+        if (is_scrolled_to_bottom(qh))
             qh->scroll_pin_bottom = TRUE;
-        else
-            qh->scroll_pin_value = prev_val;
         render_conversation(qh, snapshot);
         g_free(snapshot);
     }
@@ -800,8 +805,6 @@ static gboolean input_resize_idle(gpointer data) {
     GtkWidget *child = gtk_scrolled_window_get_child(sw);
     if (!child) return G_SOURCE_REMOVE;
 
-    gboolean was_at_bottom = qh->expanded && is_scrolled_to_bottom(qh);
-
     /* Get preferred height of text view (reflects actual content) */
     int nat_h;
     gtk_widget_measure(child, GTK_ORIENTATION_VERTICAL, -1,
@@ -810,10 +813,6 @@ static gboolean input_resize_idle(gpointer data) {
     /* Add padding to account for the frame border/padding around the scroll */
     int h = MIN(nat_h + 6, INPUT_MAX_HEIGHT);
     gtk_widget_set_size_request(GTK_WIDGET(sw), -1, h);
-
-    /* If chat was scrolled to bottom, keep it pinned there after resize */
-    if (was_at_bottom)
-        qh->scroll_pin_bottom = TRUE;
 
     return G_SOURCE_REMOVE;
 }
@@ -939,7 +938,6 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     qh->sys = sys;
     g_mutex_init(&qh->stream_lock);
     qh->focused_bubble = -1;
-    qh->scroll_pin_value = -1;
     qh->bubble_links = g_ptr_array_new_with_free_func(
         (GDestroyNotify)g_ptr_array_unref);
     qh->pending_images = g_ptr_array_new_with_free_func(pending_image_free);

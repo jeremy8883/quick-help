@@ -51,9 +51,10 @@ struct _QuickHelpWindow {
     GPtrArray *pending_images;  /* array of PendingImage* */
     GtkBox *image_preview_box;  /* horizontal box for thumbnails */
     GtkButton *scroll_to_bottom; /* floating chevron button */
+    guint scroll_btn_timer;      /* debounce timer for showing the chevron */
     GtkWidget *drop_overlay;     /* "Drop images here" overlay */
     gboolean scroll_pin_bottom;  /* request scroll-to-bottom on next upper change */
-    double scroll_pin_value;     /* restore this value on next upper change (-1=none) */
+    gboolean was_at_bottom;      /* tracks whether chat was scrolled to bottom */
     gboolean submit_after_cancel; /* submit queued text after stream cancel completes */
 };
 
