@@ -16,12 +16,14 @@ typedef struct {
     AiStreamCallback cb;
     void            *user_data;
     GString         *buf;         /* SSE line buffer */
+    GString         *full_resp;   /* raw response (for non-SSE error parsing) */
     GString         *full_text;   /* accumulated text from text blocks */
     ToolCall        *tool_calls;
     int              num_tools;
     int              tool_cap;
     char            *stop_reason;
     int             *cancel_flag;
+    gboolean         had_error;   /* TRUE if error callback already fired */
 } StreamState;
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +85,7 @@ static void process_sse_data(StreamState *st, const char *data) {
     } else if (type && strcmp(type, "error") == 0) {
         JsonObject *e = json_object_get_object_member(obj, "error");
         const char *msg = e ? json_object_get_string_member(e, "message") : "unknown";
+        st->had_error = TRUE;
         st->cb(NULL, msg, st->user_data);
     }
 
@@ -113,6 +116,7 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
         return 0; /* abort curl transfer */
     size_t total = size * nmemb;
     g_string_append_len(st->buf, ptr, total);
+    g_string_append_len(st->full_resp, ptr, total);
     process_sse_buffer(st);
     return total;
 }
@@ -348,6 +352,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
             .cb          = cb,
             .user_data   = user_data,
             .buf         = g_string_new(NULL),
+            .full_resp   = g_string_new(NULL),
             .full_text   = g_string_new(NULL),
             .cancel_flag = &self->cancel_requested,
         };
@@ -371,11 +376,44 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         if (res != CURLE_OK && !cancelled)
             cb(NULL, curl_easy_strerror(res), user_data);
 
+        /* Check HTTP status for non-SSE error responses (e.g. 400 with
+         * plain JSON body).  The SSE parser only handles "data:" lines,
+         * so a plain JSON error body is silently ignored. */
+        if (res == CURLE_OK && !cancelled && !st.had_error) {
+            long http_code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+            if (http_code >= 400) {
+                /* Try to extract the message from the JSON error body */
+                const char *err_msg = NULL;
+                JsonParser *ep = json_parser_new();
+                if (json_parser_load_from_data(ep, st.full_resp->str,
+                                               st.full_resp->len, NULL)) {
+                    JsonObject *eo = json_node_get_object(
+                        json_parser_get_root(ep));
+                    JsonObject *ei = eo ? json_object_get_object_member(
+                        eo, "error") : NULL;
+                    if (ei)
+                        err_msg = json_object_get_string_member(
+                            ei, "message");
+                }
+                if (err_msg) {
+                    cb(NULL, err_msg, user_data);
+                } else {
+                    char *fallback = g_strdup_printf(
+                        "API request failed (HTTP %ld)", http_code);
+                    cb(NULL, fallback, user_data);
+                    g_free(fallback);
+                }
+                g_object_unref(ep);
+            }
+        }
+
         curl_slist_free_all(hdrs);
         curl_easy_cleanup(curl);
         g_free(auth);
         g_free(body);
         g_string_free(st.buf, TRUE);
+        g_string_free(st.full_resp, TRUE);
 
         /* ---- Handle tool calls ---- */
         gboolean need_tools = !cancelled && st.stop_reason

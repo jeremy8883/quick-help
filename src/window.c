@@ -75,6 +75,9 @@ static void expand_window(QuickHelpWindow *qh) {
 /*  Image helpers                                                      */
 /* ------------------------------------------------------------------ */
 
+static void add_pending_image(QuickHelpWindow *qh, GdkTexture *texture,
+                              const char *media_type, char *base64);
+
 static GdkTexture *texture_from_base64(const char *base64) {
     gsize len;
     guchar *data = g_base64_decode(base64, &len);
@@ -412,7 +415,15 @@ static gboolean on_stream_update(gpointer data) {
                 set_input_text(qh, m->content);
                 g_free(m->role);
                 g_free(m->content);
+                /* Restore images back to pending so the user can retry */
                 for (int j = 0; j < m->image_count; j++) {
+                    GdkTexture *tex = texture_from_base64(m->images[j].base64);
+                    if (tex) {
+                        add_pending_image(qh, tex,
+                                          m->images[j].media_type,
+                                          g_strdup(m->images[j].base64));
+                        g_object_unref(tex);
+                    }
                     g_free(m->images[j].media_type);
                     g_free(m->images[j].base64);
                 }
