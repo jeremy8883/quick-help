@@ -13,4 +13,8 @@ WindowInfo *detect_focused_window(void);
 
 void window_info_free(WindowInfo *info);
 
+/* Make our window always-on-top via window-calls D-Bus extension.
+ * Finds the window by our PID and calls MakeAbove. */
+void make_window_above(void);
+
 #endif

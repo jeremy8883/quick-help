@@ -1,4 +1,5 @@
 #include "window_internal.h"
+#include "window_context.h"
 #include "system_context.h"
 #include <string.h>
 
@@ -1027,6 +1028,12 @@ static GtkWidget *build_chat_area(QuickHelpWindow *qh) {
 /*  Window constructor                                                 */
 /* ------------------------------------------------------------------ */
 
+static void on_window_map(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    (void)user_data;
+    make_window_above();
+}
+
 QuickHelpWindow *quick_help_window_new(GtkApplication *app,
                                         AiBackend *backend,
                                         WindowInfo *info,
@@ -1167,6 +1174,7 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
         g_object_unref(file);
     }
 
+    g_signal_connect(qh->window, "map", G_CALLBACK(on_window_map), NULL);
     gtk_window_present(qh->window);
     gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
 
