@@ -596,6 +596,7 @@ static void on_remove_image(GtkButton *button, gpointer data) {
         if (child == overlay) {
             g_ptr_array_remove_index(qh->pending_images, idx);
             rebuild_image_preview(qh);
+            gtk_widget_grab_focus(GTK_WIDGET(qh->text_view));
             return;
         }
         child = gtk_widget_get_next_sibling(child);
