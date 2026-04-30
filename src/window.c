@@ -77,6 +77,42 @@ static void expand_window(QuickHelpWindow *qh) {
 
 static void add_pending_image(QuickHelpWindow *qh, GdkTexture *texture,
                               const char *media_type, char *base64);
+static void rebuild_image_preview(QuickHelpWindow *qh);
+
+/* Encode a texture as base64, using JPEG compression if the PNG would be
+ * too large for the API (Anthropic limit is ~5 MB). */
+#define IMAGE_SIZE_THRESHOLD (4 * 1024 * 1024)
+
+static char *texture_to_base64(GdkTexture *texture, const char **out_media_type) {
+    GBytes *png = gdk_texture_save_to_png_bytes(texture);
+    gsize png_size = g_bytes_get_size(png);
+
+    if (png_size < IMAGE_SIZE_THRESHOLD) {
+        char *b64 = g_base64_encode(g_bytes_get_data(png, NULL), png_size);
+        g_bytes_unref(png);
+        *out_media_type = "image/png";
+        return b64;
+    }
+
+    /* Re-encode as JPEG */
+    GInputStream *stream = g_memory_input_stream_new_from_bytes(png);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream(stream, NULL, NULL);
+    g_object_unref(stream);
+    g_bytes_unref(png);
+    if (!pixbuf) { *out_media_type = NULL; return NULL; }
+
+    gchar *buf = NULL;
+    gsize buf_len = 0;
+    gdk_pixbuf_save_to_buffer(pixbuf, &buf, &buf_len, "jpeg", NULL,
+                              "quality", "80", NULL);
+    g_object_unref(pixbuf);
+    if (!buf) { *out_media_type = NULL; return NULL; }
+
+    char *b64 = g_base64_encode((const guchar *)buf, buf_len);
+    g_free(buf);
+    *out_media_type = "image/jpeg";
+    return b64;
+}
 
 static GdkTexture *texture_from_base64(const char *base64) {
     gsize len;
@@ -549,6 +585,24 @@ static void on_stop_clicked(GtkButton *button, gpointer data) {
 /*  Image management                                                   */
 /* ------------------------------------------------------------------ */
 
+static void on_remove_image(GtkButton *button, gpointer data) {
+    (void)button;
+    QuickHelpWindow *qh = data;
+    /* Find which overlay this button belongs to */
+    GtkWidget *overlay = gtk_widget_get_parent(GTK_WIDGET(button));
+    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->image_preview_box));
+    guint idx = 0;
+    while (child) {
+        if (child == overlay) {
+            g_ptr_array_remove_index(qh->pending_images, idx);
+            rebuild_image_preview(qh);
+            return;
+        }
+        child = gtk_widget_get_next_sibling(child);
+        idx++;
+    }
+}
+
 static void rebuild_image_preview(QuickHelpWindow *qh) {
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(qh->image_preview_box))))
@@ -556,8 +610,21 @@ static void rebuild_image_preview(QuickHelpWindow *qh) {
 
     for (guint i = 0; i < qh->pending_images->len; i++) {
         PendingImage *img = g_ptr_array_index(qh->pending_images, i);
-        gtk_box_append(qh->image_preview_box,
-                       make_thumbnail(GDK_PAINTABLE(img->texture)));
+
+        GtkWidget *overlay = gtk_overlay_new();
+        GtkWidget *thumb = make_thumbnail(GDK_PAINTABLE(img->texture));
+        gtk_overlay_set_child(GTK_OVERLAY(overlay), thumb);
+
+        GtkWidget *btn = gtk_button_new_from_icon_name("window-close-symbolic");
+        gtk_widget_set_halign(btn, GTK_ALIGN_END);
+        gtk_widget_set_valign(btn, GTK_ALIGN_START);
+        gtk_widget_add_css_class(btn, "circular");
+        gtk_widget_add_css_class(btn, "osd");
+        gtk_widget_set_size_request(btn, 20, 20);
+        g_signal_connect(btn, "clicked", G_CALLBACK(on_remove_image), qh);
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), btn);
+
+        gtk_box_append(qh->image_preview_box, overlay);
     }
 
     gtk_widget_set_visible(GTK_WIDGET(qh->image_preview_box),
@@ -581,12 +648,11 @@ static void on_clipboard_image_ready(GObject *source, GAsyncResult *res,
         GDK_CLIPBOARD(source), res, NULL);
     if (!texture) return;
 
-    GBytes *png = gdk_texture_save_to_png_bytes(texture);
-    char *base64 = g_base64_encode(g_bytes_get_data(png, NULL),
-                                   g_bytes_get_size(png));
-    g_bytes_unref(png);
+    const char *media_type;
+    char *base64 = texture_to_base64(texture, &media_type);
+    if (!base64) { g_object_unref(texture); return; }
 
-    add_pending_image(qh, texture, "image/png", base64);
+    add_pending_image(qh, texture, media_type, base64);
     g_object_unref(texture);
 }
 
@@ -608,21 +674,33 @@ static void add_image_from_file(QuickHelpWindow *qh, GFile *file) {
     char *path = g_file_get_path(file);
     if (!path) return;
 
-    const char *media_type = media_type_for_path(path);
-    if (!media_type) { g_free(path); return; }
+    const char *orig_media_type = media_type_for_path(path);
+    if (!orig_media_type) { g_free(path); return; }
+
+    GdkTexture *texture = gdk_texture_new_from_file(file, NULL);
+    if (!texture) { g_free(path); return; }
 
     gsize len;
     char *data;
     if (!g_file_get_contents(path, &data, &len, NULL)) {
+        g_object_unref(texture);
         g_free(path);
         return;
     }
 
-    char *base64 = g_base64_encode((const guchar *)data, len);
-    g_free(data);
+    const char *media_type;
+    char *base64;
+    if (len >= IMAGE_SIZE_THRESHOLD) {
+        /* File too large — re-encode as JPEG */
+        g_free(data);
+        base64 = texture_to_base64(texture, &media_type);
+    } else {
+        base64 = g_base64_encode((const guchar *)data, len);
+        g_free(data);
+        media_type = orig_media_type;
+    }
 
-    GdkTexture *texture = gdk_texture_new_from_file(file, NULL);
-    if (!texture) { g_free(base64); g_free(path); return; }
+    if (!base64) { g_object_unref(texture); g_free(path); return; }
 
     add_pending_image(qh, texture, media_type, base64);
     g_object_unref(texture);
