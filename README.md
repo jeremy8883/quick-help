@@ -43,27 +43,9 @@ meson setup build
 ninja -C build
 ```
 
-* Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys). GNOME shortcuts run from the systemd user session, not your shell, so an `export` in `.bashrc`/`.zshrc` won't be visible. Drop the key in `~/.config/environment.d/` instead:
+* Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys) and set the `ANTHROPIC_API_KEY` environment variable. Note that if you launch via a GNOME shortcut, the shortcut runs from the systemd user session, not your shell, so an `export` in `.bashrc`/`.zshrc` won't be visible.
 
-```bash
-cat > ~/.config/environment.d/anthropic.conf <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...
-EOF
-chmod 600 ~/.config/environment.d/anthropic.conf
-```
-
-* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/). The free plan gives 2,000 queries/month.
-
-```bash
-cat > ~/.config/environment.d/brave-search.conf <<'EOF'
-BRAVE_SEARCH_API_KEY=BSA...
-EOF
-chmod 600 ~/.config/environment.d/brave-search.conf
-```
-
-Without this key the app still works, but it won't offer web search to the AI (URL fetching still works).
-
-* Restart your machine for the env variables to be picked up by your session (I'm sure there's an easier way).
+* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/) and set `BRAVE_SEARCH_API_KEY`. The free plan gives 2,000 queries/month. Without this key the app still works, but it won't offer web search to the AI (URL fetching still works).
 
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
 
