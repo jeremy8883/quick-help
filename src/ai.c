@@ -24,6 +24,8 @@ typedef struct {
     char            *stop_reason;
     int             *cancel_flag;
     gboolean         had_error;   /* TRUE if error callback already fired */
+    AiToolStatusCallback tool_status_cb;
+    void                *tool_status_data;
 } StreamState;
 
 /* ------------------------------------------------------------------ */
@@ -48,7 +50,14 @@ static void process_sse_data(StreamState *st, const char *data) {
         JsonObject *cb = json_object_get_object_member(obj, "content_block");
         if (cb) {
             const char *bt = json_object_get_string_member(cb, "type");
-            if (bt && strcmp(bt, "tool_use") == 0) {
+            if (bt && strcmp(bt, "server_tool_use") == 0) {
+                const char *name = json_object_get_string_member(cb, "name");
+                if (name && strcmp(name, "web_search") == 0
+                    && st->tool_status_cb) {
+                    st->tool_status_cb("server_web_search", "",
+                                       st->tool_status_data);
+                }
+            } else if (bt && strcmp(bt, "tool_use") == 0) {
                 if (st->num_tools >= st->tool_cap) {
                     st->tool_cap = st->tool_cap ? st->tool_cap * 2 : 4;
                     st->tool_calls = g_realloc(st->tool_calls,
@@ -321,6 +330,17 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         web_tool_add_definitions(b);
         if (self->brave_api_key)
             search_tool_add_definitions(b);
+        else {
+            /* Anthropic server-side web search (no API key needed) */
+            json_builder_begin_object(b);
+            json_builder_set_member_name(b, "type");
+            json_builder_add_string_value(b, "web_search_20250305");
+            json_builder_set_member_name(b, "name");
+            json_builder_add_string_value(b, "web_search");
+            json_builder_set_member_name(b, "max_uses");
+            json_builder_add_int_value(b, 5);
+            json_builder_end_object(b);
+        }
         json_builder_end_array(b);
 
         json_builder_set_member_name(b, "messages");
@@ -349,12 +369,14 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         }
 
         StreamState st = {
-            .cb          = cb,
-            .user_data   = user_data,
-            .buf         = g_string_new(NULL),
-            .full_resp   = g_string_new(NULL),
-            .full_text   = g_string_new(NULL),
-            .cancel_flag = &self->cancel_requested,
+            .cb               = cb,
+            .user_data        = user_data,
+            .buf              = g_string_new(NULL),
+            .full_resp        = g_string_new(NULL),
+            .full_text        = g_string_new(NULL),
+            .cancel_flag      = &self->cancel_requested,
+            .tool_status_cb   = self->tool_status_cb,
+            .tool_status_data = self->tool_status_data,
         };
 
         char *auth = g_strdup_printf("x-api-key: %s", cd->api_key);

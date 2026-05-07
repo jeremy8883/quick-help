@@ -45,7 +45,7 @@ ninja -C build
 
 * Generate an Anthropic API key [here](https://console.anthropic.com/settings/keys) and set the `ANTHROPIC_API_KEY` environment variable. Note that if you launch via a GNOME shortcut, the shortcut runs from the systemd user session, not your shell, so an `export` in `.bashrc`/`.zshrc` won't be visible.
 
-* **(Optional)** To enable web search, generate a Brave Search API key [here](https://brave.com/search/api/) and set `BRAVE_SEARCH_API_KEY`. The free plan gives 2,000 queries/month. Without this key the app still works, but it won't offer web search to the AI (URL fetching still works).
+* **(Optional)** Web search is available out of the box via Anthropic's built-in search. If you'd prefer to use Brave Search instead (free tier: 2,000 queries/month), generate a key [here](https://brave.com/search/api/) and set `BRAVE_SEARCH_API_KEY`.
 
 * Add a custom shortcut under **Settings > Keyboard > Custom Shortcuts** and set the command to the full path of the binary. eg. `/home/you/Applications/quick-help/build/quick-help`
 

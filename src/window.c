@@ -537,8 +537,11 @@ static void on_stream_chunk(const char *delta, const char *error,
 static void on_tool_status(const char *tool_name, const char *detail,
                            void *user_data) {
     QuickHelpWindow *qh = user_data;
-    const char *verb = (tool_name && strcmp(tool_name, "web_search") == 0)
-                       ? "Web search" : "Fetch from";
+    const char *verb = "Fetch from";
+    if (tool_name && strcmp(tool_name, "web_search") == 0)
+        verb = "Brave search";
+    else if (tool_name && strcmp(tool_name, "server_web_search") == 0)
+        verb = "Anthropic web search";
 
     g_mutex_lock(&qh->stream_lock);
     char *marker = g_strdup_printf("\x01TOOL:%s %s\x01", verb, detail);
