@@ -55,6 +55,7 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     if (qh->streaming_buf)
         g_string_free(qh->streaming_buf, TRUE);
     g_free(qh->stream_error_msg);
+    g_free(qh->stream_last_markup);
     g_mutex_clear(&qh->stream_lock);
     g_ptr_array_unref(qh->bubble_links);
     g_ptr_array_unref(qh->pending_images);
@@ -79,6 +80,7 @@ static void expand_window(QuickHelpWindow *qh) {
 static void add_pending_image(QuickHelpWindow *qh, GdkTexture *texture,
                               const char *media_type, char *base64);
 static void rebuild_image_preview(QuickHelpWindow *qh);
+static void reset_stream_partial_state(QuickHelpWindow *qh);
 
 /* Encode a texture as base64, using JPEG compression if the PNG would be
  * too large for the API (Anthropic limit is ~5 MB). */
@@ -306,47 +308,31 @@ static char *render_markdown_with_links(const char *content, GPtrArray *links) {
     return pango;
 }
 
-/* Render assistant content that may contain \x01TOOL:...\x01 markers.
- * Text segments become bubbles; markers become persistent grey status lines.
- * Returns the number of bubbles added. */
-static int render_assistant_content(QuickHelpWindow *qh, const char *content,
-                                    int start_bubble_idx) {
-    int bubbles = 0;
-    const char *p = content;
+/* Assistant content parsed into a sequence of items: tool status markers
+ * (\x01TOOL:...\x01) and markdown text segments. */
+typedef struct {
+    gboolean is_tool;
+    char *text; /* tool status string, or raw markdown segment */
+} StreamItem;
+
+static void stream_item_free(gpointer data) {
+    StreamItem *it = data;
+    g_free(it->text);
+    g_free(it);
+}
+
+static GPtrArray *parse_stream_items(const char *content) {
+    GPtrArray *items = g_ptr_array_new_with_free_func(stream_item_free);
+    const char *p = content ? content : "";
     while (*p) {
-        /* Try to match a tool marker */
         if (*p == '\x01') {
             if (strncmp(p, "\x01TOOL:", 6) == 0) {
                 const char *end = strchr(p + 6, '\x01');
                 if (end) {
-                    char *status = g_strndup(p + 6, end - p - 6);
-                    char *markup;
-                    const char *fetch_prefix = "Fetch from ";
-                    if (strncmp(status, fetch_prefix, strlen(fetch_prefix)) == 0) {
-                        const char *url = status + strlen(fetch_prefix);
-                        char *esc_url = g_markup_escape_text(url, -1);
-                        markup = g_strdup_printf(
-                            "<i>Fetch from <a href=\"%s\">%s</a></i>",
-                            esc_url, esc_url);
-                        g_free(esc_url);
-                    } else {
-                        char *esc = g_markup_escape_text(status, -1);
-                        markup = g_strdup_printf("<i>%s</i>", esc);
-                        g_free(esc);
-                    }
-                    GtkWidget *lbl = gtk_label_new(NULL);
-                    gtk_label_set_markup(GTK_LABEL(lbl), markup);
-                    gtk_label_set_wrap(GTK_LABEL(lbl), TRUE);
-                    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
-                    gtk_widget_set_opacity(lbl, 0.5);
-                    gtk_widget_set_margin_start(lbl, 16);
-                    gtk_widget_set_margin_top(lbl, 2);
-                    gtk_widget_set_margin_bottom(lbl, 2);
-                    g_signal_connect(lbl, "activate-link",
-                                     G_CALLBACK(on_label_activate_link), NULL);
-                    gtk_box_append(qh->chat_box, lbl);
-                    g_free(markup);
-                    g_free(status);
+                    StreamItem *it = g_new0(StreamItem, 1);
+                    it->is_tool = TRUE;
+                    it->text = g_strndup(p + 6, end - p - 6);
+                    g_ptr_array_add(items, it);
                     p = end + 1;
                     continue;
                 }
@@ -355,14 +341,63 @@ static int render_assistant_content(QuickHelpWindow *qh, const char *content,
             p++;
             continue;
         }
-        /* Regular text until next \x01 or end */
         const char *next = strchr(p, '\x01');
         size_t len = next ? (size_t)(next - p) : strlen(p);
         char *segment = g_strndup(p, len);
         g_strstrip(segment);
         if (*segment) {
+            StreamItem *it = g_new0(StreamItem, 1);
+            it->text = segment;
+            g_ptr_array_add(items, it);
+        } else {
+            g_free(segment);
+        }
+        p += len;
+    }
+    return items;
+}
+
+static GtkWidget *make_tool_status_label(const char *status) {
+    char *markup;
+    const char *fetch_prefix = "Fetch from ";
+    if (strncmp(status, fetch_prefix, strlen(fetch_prefix)) == 0) {
+        const char *url = status + strlen(fetch_prefix);
+        char *esc_url = g_markup_escape_text(url, -1);
+        markup = g_strdup_printf("<i>Fetch from <a href=\"%s\">%s</a></i>",
+                                 esc_url, esc_url);
+        g_free(esc_url);
+    } else {
+        char *esc = g_markup_escape_text(status, -1);
+        markup = g_strdup_printf("<i>%s</i>", esc);
+        g_free(esc);
+    }
+    GtkWidget *lbl = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(lbl), markup);
+    gtk_label_set_wrap(GTK_LABEL(lbl), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0);
+    gtk_widget_set_opacity(lbl, 0.5);
+    gtk_widget_set_margin_start(lbl, 16);
+    gtk_widget_set_margin_top(lbl, 2);
+    gtk_widget_set_margin_bottom(lbl, 2);
+    g_signal_connect(lbl, "activate-link",
+                     G_CALLBACK(on_label_activate_link), NULL);
+    return lbl;
+}
+
+/* Render assistant content that may contain \x01TOOL:...\x01 markers.
+ * Text segments become bubbles; markers become persistent grey status lines.
+ * Returns the number of bubbles added. */
+static int render_assistant_content(QuickHelpWindow *qh, const char *content,
+                                    int start_bubble_idx) {
+    GPtrArray *items = parse_stream_items(content);
+    int bubbles = 0;
+    for (guint i = 0; i < items->len; i++) {
+        StreamItem *it = g_ptr_array_index(items, i);
+        if (it->is_tool) {
+            gtk_box_append(qh->chat_box, make_tool_status_label(it->text));
+        } else {
             GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
-            char *pango = render_markdown_with_links(segment, links);
+            char *pango = render_markdown_with_links(it->text, links);
             GtkWidget *bubble = make_bubble(make_markup_label(pango), FALSE);
             if (start_bubble_idx + bubbles == qh->focused_bubble)
                 gtk_widget_add_css_class(bubble, "focused-bubble");
@@ -371,17 +406,17 @@ static int render_assistant_content(QuickHelpWindow *qh, const char *content,
             g_ptr_array_add(qh->bubble_links, links);
             bubbles++;
         }
-        g_free(segment);
-        p += len;
     }
+    g_ptr_array_unref(items);
     return bubbles;
 }
 
 void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
-    /* Clear chat_box */
+    /* Clear chat_box (this destroys any in-place streaming widgets too) */
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box))))
         gtk_box_remove(qh->chat_box, child);
+    reset_stream_partial_state(qh);
 
     g_ptr_array_set_size(qh->bubble_links, 0);
     int bubble_idx = 0;
@@ -430,32 +465,107 @@ static int count_chat_children(QuickHelpWindow *qh) {
     return n;
 }
 
+static void reset_stream_partial_state(QuickHelpWindow *qh) {
+    qh->stream_items_rendered = 0;
+    qh->stream_last_label = NULL;
+    g_free(qh->stream_last_markup);
+    qh->stream_last_markup = NULL;
+}
+
 /* Record where the committed conversation ends so streaming updates can
  * rebuild only the widgets after this point. */
 static void mark_stream_render_base(QuickHelpWindow *qh) {
     qh->stream_fixed_children = count_chat_children(qh);
     qh->stream_fixed_links = qh->bubble_links->len;
     qh->stream_fixed_bubbles = qh->bubble_count;
+    reset_stream_partial_state(qh);
 }
 
-/* Re-render only the streaming portion of the conversation. Widgets of
- * committed messages are left untouched so text selections (and focus)
- * in them survive streaming updates. */
+/* Re-render only the streaming portion of the conversation. Committed
+ * message widgets are never touched, and the bubble currently being
+ * streamed is updated in place — preserving any text selection in it —
+ * rather than destroyed and rebuilt. Content is append-only, so already
+ * rendered items form a prefix of the parsed items; only the last one can
+ * have grown. */
 static void render_stream_partial(QuickHelpWindow *qh, const char *partial) {
-    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
-    for (int i = 0; i < qh->stream_fixed_children && child; i++)
-        child = gtk_widget_get_next_sibling(child);
-    while (child) {
-        GtkWidget *next = gtk_widget_get_next_sibling(child);
-        gtk_box_remove(qh->chat_box, child);
-        child = next;
+    GPtrArray *items = parse_stream_items(partial);
+
+    /* Safety net: if the rendered widgets no longer form a prefix of the
+     * items (e.g. an external full re-render happened), start over. */
+    if ((int)items->len < qh->stream_items_rendered) {
+        GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
+        for (int i = 0; i < qh->stream_fixed_children && child; i++)
+            child = gtk_widget_get_next_sibling(child);
+        while (child) {
+            GtkWidget *next = gtk_widget_get_next_sibling(child);
+            gtk_box_remove(qh->chat_box, child);
+            child = next;
+        }
+        g_ptr_array_set_size(qh->bubble_links, qh->stream_fixed_links);
+        qh->bubble_count = qh->stream_fixed_bubbles;
+        reset_stream_partial_state(qh);
     }
 
-    g_ptr_array_set_size(qh->bubble_links, qh->stream_fixed_links);
-    qh->bubble_count = qh->stream_fixed_bubbles;
-    if (partial)
-        qh->bubble_count += render_assistant_content(
-            qh, partial, qh->stream_fixed_bubbles);
+    /* The last previously-rendered item may have grown since the previous
+     * update; if it's a text bubble its link set changes with it, so drop
+     * its bubble_links entry and re-add it below. */
+    guint start = qh->stream_items_rendered;
+    if (start > 0 && qh->stream_last_label) {
+        start--;
+        g_ptr_array_set_size(qh->bubble_links, qh->bubble_links->len - 1);
+        qh->bubble_count--;
+    }
+
+    for (guint i = start; i < items->len; i++) {
+        StreamItem *it = g_ptr_array_index(items, i);
+        gboolean is_last = (i == items->len - 1);
+
+        if (it->is_tool) {
+            if ((int)i >= qh->stream_items_rendered)
+                gtk_box_append(qh->chat_box, make_tool_status_label(it->text));
+            if (is_last) {
+                qh->stream_last_label = NULL;
+                g_free(qh->stream_last_markup);
+                qh->stream_last_markup = NULL;
+            }
+            continue;
+        }
+
+        GPtrArray *links = g_ptr_array_new_with_free_func(g_free);
+        char *pango = render_markdown_with_links(it->text, links);
+        GtkWidget *lbl;
+        if ((int)i < qh->stream_items_rendered) {
+            /* The growing bubble — update in place. Text only appends at
+             * the end, so restoring the selection offsets keeps a
+             * selection made while the answer streams in. */
+            lbl = qh->stream_last_label;
+            if (g_strcmp0(pango, qh->stream_last_markup) != 0) {
+                int sel_start, sel_end;
+                gboolean had_sel = gtk_label_get_selection_bounds(
+                    GTK_LABEL(lbl), &sel_start, &sel_end);
+                gtk_label_set_markup(GTK_LABEL(lbl), pango);
+                if (had_sel)
+                    gtk_label_select_region(GTK_LABEL(lbl),
+                                            sel_start, sel_end);
+            }
+        } else {
+            lbl = make_markup_label(pango);
+            gtk_box_append(qh->chat_box, make_bubble(lbl, FALSE));
+        }
+        g_ptr_array_add(qh->bubble_links, links);
+        qh->bubble_count++;
+        if (is_last) {
+            qh->stream_last_label = lbl;
+            g_free(qh->stream_last_markup);
+            qh->stream_last_markup = g_strdup(pango);
+        }
+        g_free(pango);
+    }
+
+    qh->stream_items_rendered = items->len;
+    if (items->len == 0)
+        reset_stream_partial_state(qh);
+    g_ptr_array_unref(items);
 }
 
 static gboolean on_stream_update(gpointer data) {
@@ -463,6 +573,14 @@ static gboolean on_stream_update(gpointer data) {
 
     g_mutex_lock(&qh->stream_lock);
     qh->stream_ui_pending = FALSE;
+    if (qh->stream_drag_hold) {
+        /* User is drag-selecting inside the streaming bubble: rendering now
+         * would break the drag. Hold everything until the button release. */
+        qh->stream_update_deferred = TRUE;
+        g_mutex_unlock(&qh->stream_lock);
+        return G_SOURCE_REMOVE;
+    }
+    qh->stream_update_deferred = FALSE;
     char *snapshot = g_strdup(qh->streaming_buf->str);
     gboolean done = !qh->streaming;
     gboolean had_error = qh->stream_had_error;
@@ -545,6 +663,58 @@ static gboolean on_stream_update(gpointer data) {
     }
 
     return G_SOURCE_REMOVE;
+}
+
+/* Apply an update that was skipped during a drag hold (main thread only) */
+static void flush_deferred_stream_update(QuickHelpWindow *qh) {
+    g_mutex_lock(&qh->stream_lock);
+    gboolean flush = qh->stream_update_deferred && !qh->stream_ui_pending;
+    if (flush)
+        qh->stream_ui_pending = TRUE;
+    g_mutex_unlock(&qh->stream_lock);
+    if (flush)
+        on_stream_update(qh);
+}
+
+/* Watch raw pointer events (capture phase, never consumed): a primary-button
+ * press inside the actively streaming bubble starts a drag hold; the release
+ * ends it and flushes whatever streamed in the meantime. Selections in other
+ * bubbles never pause updates — their widgets aren't touched anyway. */
+static gboolean pointer_in_stream_label(QuickHelpWindow *qh,
+                                        double x, double y) {
+    GtkWidget *lbl = qh->stream_last_label;
+    if (!lbl) return FALSE;
+    double tx, ty;
+    gtk_native_get_surface_transform(GTK_NATIVE(qh->window), &tx, &ty);
+    graphene_point_t p = GRAPHENE_POINT_INIT((float)(x - tx), (float)(y - ty));
+    graphene_point_t out;
+    if (!gtk_widget_compute_point(GTK_WIDGET(qh->window), lbl, &p, &out))
+        return FALSE;
+    return out.x >= 0 && out.y >= 0 &&
+           out.x < gtk_widget_get_width(lbl) &&
+           out.y < gtk_widget_get_height(lbl);
+}
+
+static gboolean on_pointer_event(GtkEventControllerLegacy *ctrl,
+                                 GdkEvent *event, gpointer data) {
+    (void)ctrl;
+    QuickHelpWindow *qh = data;
+    GdkEventType type = gdk_event_get_event_type(event);
+
+    if (type == GDK_BUTTON_PRESS) {
+        double x, y;
+        if (qh->streaming &&
+            gdk_button_event_get_button(event) == GDK_BUTTON_PRIMARY &&
+            gdk_event_get_position(event, &x, &y) &&
+            pointer_in_stream_label(qh, x, y))
+            qh->stream_drag_hold = TRUE;
+    } else if (type == GDK_BUTTON_RELEASE) {
+        if (qh->stream_drag_hold) {
+            qh->stream_drag_hold = FALSE;
+            flush_deferred_stream_update(qh);
+        }
+    }
+    return GDK_EVENT_PROPAGATE;
 }
 
 static void on_stream_chunk(const char *delta, const char *error,
@@ -795,6 +965,11 @@ static gboolean pulse_progress(gpointer data) {
 }
 
 void on_submit(QuickHelpWindow *qh) {
+    /* If a stream completion is still held back by a drag-selection, apply
+     * it first so the pending assistant message gets committed. */
+    qh->stream_drag_hold = FALSE;
+    flush_deferred_stream_update(qh);
+
     char *text = get_input_text(qh);
     g_strstrip(text);
     gboolean has_images = qh->pending_images->len > 0;
@@ -857,14 +1032,17 @@ void on_submit(QuickHelpWindow *qh) {
 
 void clear_conversation(QuickHelpWindow *qh) {
     free_messages(qh);
+    qh->stream_drag_hold = FALSE;
     g_mutex_lock(&qh->stream_lock);
     if (qh->streaming_buf)
         g_string_truncate(qh->streaming_buf, 0);
+    qh->stream_update_deferred = FALSE;
     g_mutex_unlock(&qh->stream_lock);
 
     GtkWidget *c;
     while ((c = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box))))
         gtk_box_remove(qh->chat_box, c);
+    reset_stream_partial_state(qh);
 
     gtk_widget_set_visible(GTK_WIDGET(qh->error_label), FALSE);
     g_ptr_array_set_size(qh->bubble_links, 0);
@@ -1160,6 +1338,13 @@ QuickHelpWindow *quick_help_window_new(GtkApplication *app,
     gtk_event_controller_set_propagation_phase(key_ctrl, GTK_PHASE_CAPTURE);
     g_signal_connect(key_ctrl, "key-pressed", G_CALLBACK(on_key_pressed), qh);
     gtk_widget_add_controller(GTK_WIDGET(qh->window), key_ctrl);
+
+    /* Pointer watcher: pauses streaming UI updates while the user is
+     * drag-selecting inside the actively streaming bubble */
+    GtkEventController *pointer_ctrl = gtk_event_controller_legacy_new();
+    gtk_event_controller_set_propagation_phase(pointer_ctrl, GTK_PHASE_CAPTURE);
+    g_signal_connect(pointer_ctrl, "event", G_CALLBACK(on_pointer_event), qh);
+    gtk_widget_add_controller(GTK_WIDGET(qh->window), pointer_ctrl);
 
     /* Layout: window overlay -> vbox -> [input_row, image_preview, error, chat_area] */
     GtkOverlay *window_overlay = GTK_OVERLAY(gtk_overlay_new());

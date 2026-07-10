@@ -62,6 +62,11 @@ struct _QuickHelpWindow {
     int stream_fixed_children;   /* chat_box children from committed messages */
     guint stream_fixed_links;    /* bubble_links entries from committed messages */
     int stream_fixed_bubbles;    /* bubble_count from committed messages */
+    int stream_items_rendered;   /* parsed partial items currently rendered */
+    GtkWidget *stream_last_label; /* growing bubble's label, updated in place */
+    char *stream_last_markup;    /* markup last applied to stream_last_label */
+    gboolean stream_drag_hold;   /* drag-selection active in the streaming bubble */
+    gboolean stream_update_deferred; /* update skipped during drag hold (stream_lock) */
 };
 
 /* Functions shared between window.c and input.c */
