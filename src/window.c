@@ -422,6 +422,42 @@ void render_conversation(QuickHelpWindow *qh, const char *partial_assistant) {
 /*  Streaming                                                          */
 /* ------------------------------------------------------------------ */
 
+static int count_chat_children(QuickHelpWindow *qh) {
+    int n = 0;
+    for (GtkWidget *c = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
+         c; c = gtk_widget_get_next_sibling(c))
+        n++;
+    return n;
+}
+
+/* Record where the committed conversation ends so streaming updates can
+ * rebuild only the widgets after this point. */
+static void mark_stream_render_base(QuickHelpWindow *qh) {
+    qh->stream_fixed_children = count_chat_children(qh);
+    qh->stream_fixed_links = qh->bubble_links->len;
+    qh->stream_fixed_bubbles = qh->bubble_count;
+}
+
+/* Re-render only the streaming portion of the conversation. Widgets of
+ * committed messages are left untouched so text selections (and focus)
+ * in them survive streaming updates. */
+static void render_stream_partial(QuickHelpWindow *qh, const char *partial) {
+    GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(qh->chat_box));
+    for (int i = 0; i < qh->stream_fixed_children && child; i++)
+        child = gtk_widget_get_next_sibling(child);
+    while (child) {
+        GtkWidget *next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(qh->chat_box, child);
+        child = next;
+    }
+
+    g_ptr_array_set_size(qh->bubble_links, qh->stream_fixed_links);
+    qh->bubble_count = qh->stream_fixed_bubbles;
+    if (partial)
+        qh->bubble_count += render_assistant_content(
+            qh, partial, qh->stream_fixed_bubbles);
+}
+
 static gboolean on_stream_update(gpointer data) {
     QuickHelpWindow *qh = data;
 
@@ -436,14 +472,16 @@ static gboolean on_stream_update(gpointer data) {
 
     if (done) {
         if (cancelled) {
+            const char *final_content = NULL;
             if (*snapshot && qh->msg_count < MAX_MESSAGES) {
                 qh->messages[qh->msg_count].role = g_strdup("assistant");
                 qh->messages[qh->msg_count].content = snapshot;
+                final_content = snapshot;
                 qh->msg_count++;
                 snapshot = NULL;
             }
             g_free(snapshot);
-            render_conversation(qh, NULL);
+            render_stream_partial(qh, final_content);
         } else if (had_error) {
             g_free(snapshot);
             if (qh->msg_count > 0) {
@@ -476,14 +514,16 @@ static gboolean on_stream_update(gpointer data) {
             g_free(error_msg);
             render_conversation(qh, NULL);
         } else {
+            const char *final_content = NULL;
             if (qh->msg_count < MAX_MESSAGES) {
                 qh->messages[qh->msg_count].role = g_strdup("assistant");
                 qh->messages[qh->msg_count].content = snapshot;
+                final_content = snapshot;
                 qh->msg_count++;
             } else {
                 g_free(snapshot);
             }
-            render_conversation(qh, NULL);
+            render_stream_partial(qh, final_content);
         }
         if (qh->pulse_timer_id) {
             g_source_remove(qh->pulse_timer_id);
@@ -500,7 +540,7 @@ static gboolean on_stream_update(gpointer data) {
     } else {
         if (is_scrolled_to_bottom(qh))
             qh->scroll_pin_bottom = TRUE;
-        render_conversation(qh, snapshot);
+        render_stream_partial(qh, snapshot);
         g_free(snapshot);
     }
 
@@ -797,6 +837,7 @@ void on_submit(QuickHelpWindow *qh) {
 
     qh->scroll_pin_bottom = TRUE;
     render_conversation(qh, NULL);
+    mark_stream_render_base(qh);
 
     g_mutex_lock(&qh->stream_lock);
     if (qh->streaming_buf)
@@ -1023,6 +1064,12 @@ static GtkWidget *build_chat_area(QuickHelpWindow *qh) {
     gtk_widget_set_margin_top(GTK_WIDGET(qh->chat_box), 4);
     gtk_widget_set_margin_bottom(GTK_WIDGET(qh->chat_box), 4);
     gtk_scrolled_window_set_child(qh->scroll, GTK_WIDGET(qh->chat_box));
+
+    /* Clicking a selectable label focuses it; without this the viewport
+     * scrolls the (often taller-than-view) label into view, yanking the
+     * scroll position while selecting text. */
+    GtkWidget *viewport = gtk_widget_get_parent(GTK_WIDGET(qh->chat_box));
+    gtk_viewport_set_scroll_to_focus(GTK_VIEWPORT(viewport), FALSE);
 
     return GTK_WIDGET(overlay);
 }

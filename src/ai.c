@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define MAX_TOOL_ROUNDS 5
+#define MAX_TOOL_ROUNDS 10
 
 typedef struct {
     char *api_key;
@@ -309,8 +309,12 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
                                        messages[i].image_count));
 
     g_atomic_int_set(&self->cancel_requested, 0);
+    gboolean aborted = FALSE;
 
-    for (int round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    for (int round = 0; ; round++) {
+        /* After MAX_TOOL_ROUNDS, disallow further tool calls so the model
+         * must produce a text answer instead of the loop ending silently. */
+        gboolean final_round = round >= MAX_TOOL_ROUNDS;
 
         /* ---- Build request JSON ---- */
         JsonBuilder *b = json_builder_new();
@@ -343,6 +347,16 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         }
         json_builder_end_array(b);
 
+        if (final_round) {
+            /* Tools must stay defined (prior messages reference them),
+             * but forbid new calls to force a text answer. */
+            json_builder_set_member_name(b, "tool_choice");
+            json_builder_begin_object(b);
+            json_builder_set_member_name(b, "type");
+            json_builder_add_string_value(b, "none");
+            json_builder_end_object(b);
+        }
+
         json_builder_set_member_name(b, "messages");
         json_builder_begin_array(b);
         for (guint i = 0; i < msgs->len; i++)
@@ -365,6 +379,7 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         if (!curl) {
             g_free(body);
             cb(NULL, "Failed to initialize HTTP client", user_data);
+            aborted = TRUE;
             break;
         }
 
@@ -395,16 +410,19 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
 
         CURLcode res = curl_easy_perform(curl);
         gboolean cancelled = g_atomic_int_get(&self->cancel_requested);
-        if (res != CURLE_OK && !cancelled)
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        if (res != CURLE_OK && !cancelled) {
+            st.had_error = TRUE;
             cb(NULL, curl_easy_strerror(res), user_data);
+        }
 
         /* Check HTTP status for non-SSE error responses (e.g. 400 with
          * plain JSON body).  The SSE parser only handles "data:" lines,
          * so a plain JSON error body is silently ignored. */
         if (res == CURLE_OK && !cancelled && !st.had_error) {
-            long http_code = 0;
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
             if (http_code >= 400) {
+                st.had_error = TRUE;
                 /* Try to extract the message from the JSON error body */
                 const char *err_msg = NULL;
                 JsonParser *ep = json_parser_new();
@@ -437,8 +455,13 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         g_string_free(st.buf, TRUE);
         g_string_free(st.full_resp, TRUE);
 
+        g_message("ai: round %d%s http=%ld curl=%d stop_reason=%s tools=%d",
+                  round, final_round ? " (final)" : "", http_code, res,
+                  st.stop_reason ? st.stop_reason : "(none)", st.num_tools);
+
         /* ---- Handle tool calls ---- */
-        gboolean need_tools = !cancelled && st.stop_reason
+        gboolean need_tools = !cancelled && !st.had_error && !final_round
+            && st.stop_reason
             && strcmp(st.stop_reason, "tool_use") == 0
             && st.num_tools > 0;
 
@@ -500,11 +523,18 @@ static void claude_send_stream(AiBackend *self, const char *system_prompt,
         g_string_free(st.full_text, TRUE);
         g_free(st.stop_reason);
 
-        if (!need_tools) break;
+        if (!need_tools) {
+            aborted = st.had_error;
+            break;
+        }
     }
 
     g_ptr_array_unref(msgs);
-    cb(NULL, NULL, user_data);
+    /* After an error the callback has already terminated the stream on the
+     * UI side; a trailing done-callback would run its completion path a
+     * second time. */
+    if (!aborted)
+        cb(NULL, NULL, user_data);
 }
 
 static void claude_destroy(AiBackend *self) {

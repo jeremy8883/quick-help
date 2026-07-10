@@ -56,6 +56,12 @@ struct _QuickHelpWindow {
     gboolean scroll_pin_bottom;  /* request scroll-to-bottom on next upper change */
     gboolean was_at_bottom;      /* tracks whether chat was scrolled to bottom */
     gboolean submit_after_cancel; /* submit queued text after stream cancel completes */
+    /* Snapshot of the committed conversation taken when streaming starts, so
+     * streaming updates only rebuild the widgets after this point (keeps text
+     * selections in earlier bubbles alive). */
+    int stream_fixed_children;   /* chat_box children from committed messages */
+    guint stream_fixed_links;    /* bubble_links entries from committed messages */
+    int stream_fixed_bubbles;    /* bubble_count from committed messages */
 };
 
 /* Functions shared between window.c and input.c */

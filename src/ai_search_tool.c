@@ -16,7 +16,27 @@ static size_t search_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     return size * nmemb;
 }
 
-char *search_tool_fetch(const char *query, const char *api_key) {
+/* Brave's free tier allows 1 request per second. Parallel tool calls run on
+ * separate threads, so space requests out globally or all but the first
+ * come back as HTTP 429. */
+#define SEARCH_MIN_INTERVAL_US (1100 * 1000)
+
+static GMutex search_lock;
+static gint64 search_last_request_us;
+
+static void search_rate_limit_wait(void) {
+    g_mutex_lock(&search_lock);
+    gint64 wait = search_last_request_us + SEARCH_MIN_INTERVAL_US
+                  - g_get_monotonic_time();
+    if (wait > 0)
+        g_usleep(wait);
+    search_last_request_us = g_get_monotonic_time();
+    g_mutex_unlock(&search_lock);
+}
+
+static char *search_fetch_once(const char *query, const char *api_key,
+                               long *out_http_code) {
+    *out_http_code = 0;
     CURL *curl = curl_easy_init();
     if (!curl) return g_strdup("Error: failed to init HTTP client");
 
@@ -49,7 +69,12 @@ char *search_tool_fetch(const char *query, const char *api_key) {
     } else {
         long code;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-        if (code >= 400) {
+        *out_http_code = code;
+        if (code == 429) {
+            result = g_strdup(
+                "Error: Brave Search rate limit exceeded (HTTP 429). "
+                "Avoid issuing many searches at once.");
+        } else if (code >= 400) {
             result = g_strdup_printf("HTTP error %ld", code);
         } else {
             /* Parse Brave Search JSON response */
@@ -105,6 +130,21 @@ char *search_tool_fetch(const char *query, const char *api_key) {
     curl_easy_cleanup(curl);
     g_free(auth);
     g_free(url);
+    return result;
+}
+
+char *search_tool_fetch(const char *query, const char *api_key) {
+    char *result = NULL;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        long http_code;
+        search_rate_limit_wait();
+        g_free(result);
+        result = search_fetch_once(query, api_key, &http_code);
+        if (http_code != 429)
+            break;
+        g_message("brave search rate limited (attempt %d), retrying",
+                  attempt + 1);
+    }
     return result;
 }
 
